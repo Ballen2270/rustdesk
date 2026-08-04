@@ -37,6 +37,16 @@ class RdPlatformChannel {
         .invokeMethod("setWindowTheme", {"themeName": theme.name});
   }
 
+  /// Set the calling window's overall opacity.
+  /// [opacity] is clamped to [0.0, 1.0] on the native side. macOS only.
+  /// Safe to call from any window isolate: the native handler resolves to the
+  /// NSWindow that owns the current engine (main window or a remote sub-window).
+  Future<void> setWindowOpacity(double opacity) {
+    assert(isMacOS);
+    return _hostMethodChannel
+        .invokeMethod("setWindowOpacity", {"opacity": opacity});
+  }
+
   /// Terminate .app manually.
   Future<void> terminate() {
     assert(isMacOS);

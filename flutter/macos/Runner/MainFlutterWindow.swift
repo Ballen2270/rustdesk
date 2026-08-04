@@ -193,6 +193,24 @@ class MainFlutterWindow: NSWindow {
                     self.setWindowInterfaceMode(window: window,themeName: themeName ?? "light")
                     result(nil)
                     break;
+                case "setWindowOpacity":
+                    // Set the calling window's overall opacity (0.0 - 1.0).
+                    // Works for both the main window and each multi-window sub-window,
+                    // because setMethodHandler is registered per-window (see
+                    // setOnWindowCreatedCallback) and `registrar.view?.window` resolves
+                    // to the NSWindow that owns this engine.
+                    let opacityArgs = call.arguments as? [String: Any]
+                    var opacity = (opacityArgs?["opacity"] as? Double) ?? 1.0
+                    if opacity < 0 { opacity = 0 }
+                    if opacity > 1 { opacity = 1 }
+                    if let window = registrar.view?.window {
+                        // Declare non-opaque while translucent so the window server keeps
+                        // the desktop behind this window updated; alphaValue does the blend.
+                        window.isOpaque = (opacity >= 1.0)
+                        window.alphaValue = CGFloat(opacity)
+                    }
+                    result(nil)
+                    break;
                 case "terminate":
                     NSApplication.shared.terminate(self)
                     result(nil)

@@ -18,6 +18,7 @@ import 'package:flutter_hbb/desktop/screen/desktop_terminal_screen.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
@@ -285,6 +286,24 @@ void runMultiWindow(
   }
   // show window from hidden status
   WindowController.fromWindowId(kWindowId!).show();
+  // Apply the per-peer remembered window opacity (macOS only). Done after show()
+  // so the native channel handler for this sub-window is registered. A short
+  // delay avoids racing with sub-window plugin registration.
+  if (isMacOS && appType == kAppTypeDesktopRemote) {
+    final peerId = argument['id'] as String?;
+    if (peerId != null && peerId.isNotEmpty) {
+      final raw =
+          bind.mainGetPeerOptionSync(id: peerId, key: kOptionWindowOpacity);
+      final opacity = double.tryParse(raw);
+      if (opacity != null && opacity > 0.0 && opacity < 1.0) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          try {
+            RdPlatformChannel.instance.setWindowOpacity(opacity);
+          } catch (_) {}
+        });
+      }
+    }
+  }
 }
 
 void runConnectionManagerScreen() async {

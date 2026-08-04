@@ -10,6 +10,7 @@ import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_hbb/plugin/widgets/desc_ui.dart';
 import 'package:flutter_hbb/plugin/common.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -1536,6 +1537,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         viewStyle(customPercent: _customPercent),
         scrollStyle(state, colorScheme),
         imageQuality(),
+        if (isMacOS) windowOpacity(),
         codec(),
         if (ffi.connType == ConnType.defaultConn)
           _ResolutionsMenu(
@@ -1761,6 +1763,13 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         });
   }
 
+  windowOpacity() {
+    // Per-peer window opacity slider, shown only on macOS. Placed inline in the
+    // Display menu (next to Image Quality). Reads the remembered value from the
+    // peer option, applies it live while dragging, and persists on release.
+    return _WindowOpacitySlider(id: widget.id);
+  }
+
   codec() {
     return futureBuilder(
         future: toolbarCodec(context, id, ffi),
@@ -1816,6 +1825,84 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                       ffi: ffi))
                   .toList());
         });
+  }
+}
+
+/// Per-peer window opacity slider shown inline in the Display menu (macOS only).
+/// Live-applies opacity while dragging and persists the value to the peer option
+/// on release, so it is remembered per peer on next connect.
+class _WindowOpacitySlider extends StatefulWidget {
+  final String id;
+  const _WindowOpacitySlider({Key? key, required this.id}) : super(key: key);
+
+  @override
+  State<_WindowOpacitySlider> createState() => _WindowOpacitySliderState();
+}
+
+class _WindowOpacitySliderState extends State<_WindowOpacitySlider> {
+  // Floor above zero so the window can never become fully invisible
+  // (otherwise the user could not grab or interact with it again).
+  static const double minOpacity = 0.2;
+  static const double maxOpacity = 1.0;
+
+  double _value = maxOpacity;
+
+  @override
+  void initState() {
+    super.initState();
+    final raw =
+        bind.mainGetPeerOptionSync(id: widget.id, key: kOptionWindowOpacity);
+    final v = double.tryParse(raw);
+    if (v != null) {
+      _value = v.clamp(minOpacity, maxOpacity).toDouble();
+    }
+  }
+
+  Future<void> _apply(double v) async {
+    if (!isMacOS) return;
+    try {
+      await RdPlatformChannel.instance.setWindowOpacity(v);
+    } catch (_) {}
+  }
+
+  Future<void> _persist(double v) async {
+    await bind.mainSetPeerOption(
+        id: widget.id, key: kOptionWindowOpacity, value: v.toStringAsFixed(2));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final percent = (_value * 100).round();
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0),
+        child: Row(children: [
+          Expanded(
+              child: Text(translate('Window Opacity'),
+                  style: const TextStyle(fontSize: 15))),
+          Text('$percent%', style: const TextStyle(fontSize: 15)),
+        ]),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0),
+        child: Slider(
+          value: _value,
+          min: minOpacity,
+          max: maxOpacity,
+          // 0.20 .. 1.00 in 0.01 steps (80 divisions)
+          divisions: ((maxOpacity - minOpacity) / 0.01).round(),
+          activeColor: colorScheme.primary,
+          label: '$percent%',
+          onChanged: (v) {
+            setState(() => _value = v);
+            _apply(v);
+          },
+          onChangeEnd: _persist,
+        ),
+      ),
+      Divider(),
+    ]);
   }
 }
 
