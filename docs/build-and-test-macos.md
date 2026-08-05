@@ -17,7 +17,7 @@
 | `flutter/lib/desktop/widgets/remote_toolbar.dart` | Display 菜单新增 `windowOpacity()` + `_WindowOpacitySlider` 控件（内联滑块，拖动实时生效，松手持久化） |
 | `.github/workflows/mac-build.yml` | **新增**：只编 macOS arm64、只产 unsigned dmg、不签名不发 release |
 
-不透明度取值范围 **0.20 ~ 1.00**（下限 0.2 是安全值，避免窗口被调到完全看不见、抓不回来）。存储格式为字符串（如 `"0.65"`），key = `window_opacity`，存在该 peer 的 PeerConfig 里。
+不透明度取值范围 **0.05 ~ 1.00**（下限 5%；调到很低时若看不清，可用 Dock / Cmd+Tab 把窗口切到前台，再用滑块调回）。存储格式为字符串（如 `"0.65"`），key = `window_opacity`，存在该 peer 的 PeerConfig 里。菜单标签为「不透明度」。
 
 ---
 
@@ -64,20 +64,31 @@ git push fork feature/window-opacity-macos:master
 
 ---
 
-## 3. 安装未签名的 dmg（绕过 Gatekeeper）
+## 3. 免安装运行测试版（不覆盖官方 RustDesk）
 
-未签名 + 未公证的包，双击会被拦。任选其一：
+`.app` 是自包含包，**不用装进 `/Applications`**，拖到别的路径直接跑即可，测完删掉，官方版完全不受影响。
+
+**关键：CI 产物必须重新 ad-hoc 深度签名，否则双击/启动秒退。** 原因：主程序是 ad-hoc 签名，但内嵌的 `FlutterMacOS.framework` 等带着别的 Team ID，硬运行时的"库校验"会拒绝加载（报 `different Team IDs` / `Library not loaded`）。重新整体签名让所有组件 Team ID 一致即可。
 
 ```bash
-# 方法 A：去掉隔离属性后再装（推荐）
-xattr -dr com.apple.quarantine /path/to/rustdesk-1.4.9-aarch64.dmg
-# 然后双击 dmg 拖入 Applications
+# 1. 挂载 dmg，把 app 拷到独立路径（可改名）
+hdiutil attach ~/Downloads/rustdesk-1.4.9-aarch64.dmg
+cp -R "/Volumes/RustDesk*/RustDesk.app" ~/Downloads/rustdesk/RustDesk.app
+hdiutil detach "/Volumes/RustDesk*"
 
-# 方法 B：已拖进 Applications 后对 .app 去隔离
-xattr -dr com.apple.quarantine /Applications/RustDesk.app
+# 2. 去隔离
+xattr -dr com.apple.quarantine ~/Downloads/rustdesk/RustDesk.app
+
+# 3. 重新 ad-hoc 深度签名（每次下载新产物都要做）
+codesign --force --deep --sign - ~/Downloads/rustdesk/RustDesk.app
+
+# 4. 启动（先 Quit 官方 RustDesk）
+open ~/Downloads/rustdesk/RustDesk.app
 ```
 
-或首次启动时 **右键 → 打开**，确认即可。
+> 测完直接把该 `.app` 丢废纸篓，官方版没被动过。
+> 如果 `open` 仍无反应，直接跑二进制看报错：
+> `~/Downloads/rustdesk/RustDesk.app/Contents/MacOS/RustDesk`
 
 ---
 
@@ -99,11 +110,11 @@ xattr -dr com.apple.quarantine /Applications/RustDesk.app
 
 装好后连一台测试机，重点验证：
 
-- [ ] 顶部工具栏点开 **Display** 菜单，*Image Quality* 下方出现 **Window Opacity** + 滑块和百分比。
+- [ ] 顶部工具栏点开 **Display** 菜单，*Image Quality* 下方出现 **不透明度** + 滑块和百分比。
 - [ ] 拖动滑块，**整个远程窗口（含视频画面）实时变半透明**，能看到背后的桌面。
 - [ ] 松手后断开重连同一 peer → **不透明度自动恢复**（记忆生效）。
 - [ ] 连**另一个 peer** → 应是 100%（记忆是 per-peer 的）。
-- [ ] 滑块最低 20%（窗口不会消失到抓不回来）。
+- [ ] 滑块最低 5%（窗口不会完全消失；太淡时用 Dock/Cmd+Tab 切前台调回）。
 - [ ] 关掉再开 Display 菜单，百分比显示与实际一致。
 
 ### 如果拖动滑块窗口没变透明

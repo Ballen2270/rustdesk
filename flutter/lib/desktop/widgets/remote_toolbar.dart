@@ -1840,9 +1840,9 @@ class _WindowOpacitySlider extends StatefulWidget {
 }
 
 class _WindowOpacitySliderState extends State<_WindowOpacitySlider> {
-  // Floor above zero so the window can never become fully invisible
-  // (otherwise the user could not grab or interact with it again).
-  static const double minOpacity = 0.2;
+  // Minimum 5% so the window is never fully invisible. If it gets too faint,
+  // recover it via the Dock / Cmd+Tab and the still-present toolbar slider.
+  static const double minOpacity = 0.05;
   static const double maxOpacity = 1.0;
 
   double _value = maxOpacity;
@@ -1879,7 +1879,7 @@ class _WindowOpacitySliderState extends State<_WindowOpacitySlider> {
         padding: const EdgeInsets.symmetric(horizontal: 12.0),
         child: Row(children: [
           Expanded(
-              child: Text(translate('Window Opacity'),
+              child: Text(translate('不透明度'),
                   style: const TextStyle(fontSize: 15))),
           Text('$percent%', style: const TextStyle(fontSize: 15)),
         ]),
