@@ -16,10 +16,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::client::{Data, Interface, QualityStatus, TerminalResponse, WindowsSession};
+use crate::client::{Data, Interface, QualityStatus};
 use crate::ui_session_interface::{io_loop, InvokeUiSession, Session};
 use hbb_common::message_proto::{
-    CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay,
+    CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay, TerminalResponse,
+    WindowsSession,
 };
 use hbb_common::rendezvous_proto::ConnType;
 use scrap::{ImageFormat, ImageRgb};
