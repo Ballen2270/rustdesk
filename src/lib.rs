@@ -66,6 +66,9 @@ mod ui_session_interface;
 // mhxy-buy: additive headless automation entry (compiled as the `spike` bin).
 pub mod spike;
 
+// mhxy-buy: long-running controller-side bridge (compiled as the `bridge` bin).
+pub mod bridge;
+
 mod hbbs_http;
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

@@ -11,6 +11,8 @@ on:
     paths:
       - src/spike.rs
       - src/bin/spike.rs
+      - src/bridge.rs
+      - src/bin/bridge.rs
       - src/lib.rs
       - Cargo.toml
       - .github/workflows/spike.yml
@@ -65,34 +67,34 @@ jobs:
         run: |
           $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
 
-      - name: Build spike (no flutter)
-        run: cargo build --release --bin spike
+      - name: Build spike + bridge (no flutter)
+        run: cargo build --release --bin spike --bin bridge
         env:
           MACOSX_DEPLOYMENT_TARGET: "12.3"
 
-      - name: Bundle dylibs (self-contained)
+      - name: Bundle bridge dylibs (self-contained)
         run: |
           brew install dylibbundler
-          mkdir -p spike-bundle
-          cp target/release/spike spike-bundle/spike
-          chmod +x spike-bundle/spike
-          (cd spike-bundle && dylibbundler -x spike -b -d ./libs -cd -od)
+          mkdir -p bundle
+          cp target/release/bridge bundle/bridge
+          chmod +x bundle/bridge
+          (cd bundle && dylibbundler -x bridge -b -d ./libs -cd -od)
 
       - name: Re-sign ad-hoc (arm64 needs valid signature after install_name_tool)
         run: |
-          find spike-bundle/libs -name '*.dylib' -exec codesign --force --sign - {} +
-          codesign --force --sign - spike-bundle/spike
+          find bundle/libs -name '*.dylib' -exec codesign --force --sign - {} +
+          codesign --force --sign - bundle/bridge
 
       - name: Verify all deps bundled
         run: |
-          bad=$(otool -L spike-bundle/spike | grep '.dylib' | grep -vE '@executable_path|/usr/lib/|/System/' || true)
+          bad=$(otool -L bundle/bridge | grep '.dylib' | grep -vE '@executable_path|/usr/lib/|/System/' || true)
           if [ -n "$bad" ]; then echo "::error::UNRESOLVED DEPS:"; echo "$bad"; exit 1; fi
           echo "all load commands are @executable_path or system"
 
       - name: Smoke launch (dyld + signature)
         run: |
           rm -f /tmp/smoke.out
-          spike-bundle/spike 127.0.0.1 dummy >/tmp/smoke.out 2>&1 &
+          bundle/bridge 127.0.0.1 dummy >/tmp/smoke.out 2>&1 &
           pid=$!
           sleep 6
           kill $pid 2>/dev/null || true
@@ -101,14 +103,14 @@ jobs:
           echo "$out"
           msg=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-700)
           echo "::notice::smoke output: ${msg}"
-          echo "$out" | grep -q 'connecting' || { echo "::error::did not reach runtime: ${msg}"; exit 1; }
+          echo "$out" | grep -q 'listening' || { echo "::error::bridge did not reach runtime: ${msg}"; exit 1; }
 
       - name: Tar bundle
-        run: tar czf spike-macos-aarch64.tar.gz spike-bundle
+        run: tar czf mhxy-bridge-macos-aarch64.tar.gz bundle
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: spike-macos-aarch64
-          path: spike-macos-aarch64.tar.gz
+          name: mhxy-bridge-macos-aarch64
+          path: mhxy-bridge-macos-aarch64.tar.gz
           if-no-files-found: error
