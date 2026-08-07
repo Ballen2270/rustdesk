@@ -1,0 +1,78 @@
+name: Build spike (macOS)
+
+# mhxy-buy: compiles ONLY the additive `spike` bin (no flutter) to validate the
+# headless-session module, and uploads the binary so you can download it and
+# run it on a Mac that can reach the host. CI CANNOT reach your home host, so
+# this is compile-only (+ artifact).
+
+on:
+  push:
+    branches: [ patch/mhxy-spike ]
+    paths:
+      - src/spike.rs
+      - src/bin/spike.rs
+      - src/lib.rs
+      - Cargo.toml
+      - .github/workflows/spike.yml
+  workflow_dispatch:
+
+env:
+  MAC_RUST_VERSION: "1.81"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Export GitHub Actions cache env
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install build runtime
+        run: |
+          brew install llvm pkg-config create-dmg || true
+          wget -q https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip -o -q nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          components: "rustfmt"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: spike-macos-14
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        run: |
+          $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build spike (no flutter)
+        run: cargo build --release --bin spike
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.3"
+
+      - name: Upload spike binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-macos-aarch64
+          path: target/release/spike
+          if-no-files-found: error

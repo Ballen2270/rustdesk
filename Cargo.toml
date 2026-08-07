@@ -20,6 +20,11 @@ path = "src/naming.rs"
 name = "service"
 path = "src/service.rs"
 
+# mhxy-buy: headless automation spike (additive; does not touch existing code).
+[[bin]]
+name = "spike"
+path = "src/bin/spike.rs"
+
 [features]
 inline = []
 use_samplerate = ["samplerate"]
