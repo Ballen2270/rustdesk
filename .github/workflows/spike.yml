@@ -70,9 +70,32 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "12.3"
 
-      - name: Upload spike binary
+      - name: Bundle dylibs (self-contained)
+        run: |
+          brew install dylibbundler
+          mkdir -p spike-bundle
+          cp target/release/spike spike-bundle/spike
+          chmod +x spike-bundle/spike
+          (cd spike-bundle && dylibbundler -x spike -b -d ./libs -cd -od)
+
+      - name: Verify all deps bundled
+        run: |
+          bad=$(otool -L spike-bundle/spike | grep '.dylib' | grep -vE '@executable_path|/usr/lib/|/System/' || true)
+          if [ -n "$bad" ]; then echo "::error::UNRESOLVED DEPS:"; echo "$bad"; exit 1; fi
+          echo "all load commands are @executable_path or system"
+
+      - name: Smoke launch (dyld must resolve)
+        run: |
+          out=$(timeout 8 spike-bundle/spike 127.0.0.1 dummy 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q 'connecting' || { echo "::error::binary did not reach runtime (dyld failure)"; exit 1; }
+
+      - name: Tar bundle
+        run: tar czf spike-macos-aarch64.tar.gz spike-bundle
+
+      - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
           name: spike-macos-aarch64
-          path: target/release/spike
+          path: spike-macos-aarch64.tar.gz
           if-no-files-found: error
