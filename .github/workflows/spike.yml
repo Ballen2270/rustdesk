@@ -91,7 +91,13 @@ jobs:
 
       - name: Smoke launch (dyld + signature)
         run: |
-          out=$(timeout 8 spike-bundle/spike 127.0.0.1 dummy 2>&1 || true)
+          rm -f /tmp/smoke.out
+          spike-bundle/spike 127.0.0.1 dummy >/tmp/smoke.out 2>&1 &
+          pid=$!
+          sleep 6
+          kill $pid 2>/dev/null || true
+          wait $pid 2>/dev/null || true
+          out=$(cat /tmp/smoke.out)
           echo "$out"
           msg=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-700)
           echo "::notice::smoke output: ${msg}"
