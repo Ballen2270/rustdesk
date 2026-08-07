@@ -78,17 +78,24 @@ jobs:
           chmod +x spike-bundle/spike
           (cd spike-bundle && dylibbundler -x spike -b -d ./libs -cd -od)
 
+      - name: Re-sign ad-hoc (arm64 needs valid signature after install_name_tool)
+        run: |
+          find spike-bundle/libs -name '*.dylib' -exec codesign --force --sign - {} +
+          codesign --force --sign - spike-bundle/spike
+
       - name: Verify all deps bundled
         run: |
           bad=$(otool -L spike-bundle/spike | grep '.dylib' | grep -vE '@executable_path|/usr/lib/|/System/' || true)
           if [ -n "$bad" ]; then echo "::error::UNRESOLVED DEPS:"; echo "$bad"; exit 1; fi
           echo "all load commands are @executable_path or system"
 
-      - name: Smoke launch (dyld must resolve)
+      - name: Smoke launch (dyld + signature)
         run: |
           out=$(timeout 8 spike-bundle/spike 127.0.0.1 dummy 2>&1 || true)
           echo "$out"
-          echo "$out" | grep -q 'connecting' || { echo "::error::binary did not reach runtime (dyld failure)"; exit 1; }
+          msg=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-700)
+          echo "::notice::smoke output: ${msg}"
+          echo "$out" | grep -q 'connecting' || { echo "::error::did not reach runtime: ${msg}"; exit 1; }
 
       - name: Tar bundle
         run: tar czf spike-macos-aarch64.tar.gz spike-bundle
