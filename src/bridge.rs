@@ -1,6 +1,8 @@
 // src/bridge.rs — controller-side bridge (long-running IPC server).
 //
-// Keeps a headless RustDesk Session to the host alive and serves a local TCP
+// Reads ./bridge.toml (or --config <file>, or legacy positional args) for the
+// host connection (self-hosted hbbs supported via id/server/key) and video
+// quality, then keeps a headless RustDesk Session alive and serves a local TCP
 // IPC for the Python brain:
 //   request  : one JSON line, e.g.
 //              {"cmd":"frame"} | {"cmd":"tap","x":..,"y":..,"w":..,"h":..}
@@ -9,13 +11,18 @@
 //              type 0x01 = JSON(UTF8);  type 0x02 = frame ([w:u32][h:u32][RGBA bytes])
 //
 //   Build: cargo build --release --bin bridge   (no --features flutter)
-//   Run:   ./bridge <peer-ip> <password> [port]
+//   Run:   ./bridge                  # reads ./bridge.toml
+//          ./bridge --config path    # explicit config
+//          ./bridge <peer-id> [pw]   # legacy (public/default server)
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_derive::Deserialize;
 
 use crate::client::{Data, Interface, QualityStatus};
 use crate::ui_session_interface::{io_loop, InvokeUiSession, Session};
@@ -40,7 +47,149 @@ fn left_up() -> i32 {
     MOUSE_TYPE_UP | (MOUSE_BUTTON_LEFT << 3)
 }
 
-// Tiny xorshift PRNG so humanization needs no extra crate.
+// ---- config --------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BridgeConfig {
+    #[serde(default)]
+    connection: ConnectionCfg,
+    #[serde(default)]
+    video: VideoCfg,
+    #[serde(default)]
+    ipc: IpcCfg,
+}
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            connection: ConnectionCfg::default(),
+            video: VideoCfg::default(),
+            ipc: IpcCfg::default(),
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ConnectionCfg {
+    id: String,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct VideoCfg {
+    #[serde(default = "default_quality")]
+    quality: String, // best | balanced | low | custom
+    #[serde(default = "default_cq")]
+    custom_quality: i32, // 0..100, only when quality = custom
+    #[serde(default)]
+    fps: Option<i32>,
+}
+impl Default for VideoCfg {
+    fn default() -> Self {
+        Self {
+            quality: default_quality(),
+            custom_quality: default_cq(),
+            fps: None,
+        }
+    }
+}
+fn default_quality() -> String {
+    "balanced".into()
+}
+fn default_cq() -> i32 {
+    50
+}
+
+#[derive(Deserialize)]
+struct IpcCfg {
+    #[serde(default = "default_port")]
+    port: u16,
+}
+impl Default for IpcCfg {
+    fn default() -> Self {
+        Self {
+            port: default_port(),
+        }
+    }
+}
+fn default_port() -> u16 {
+    DEFAULT_PORT
+}
+
+fn load_cfg_or_exit() -> BridgeConfig {
+    let mut args = std::env::args().skip(1);
+    let mut config_path: Option<String> = None;
+    let mut legacy: Vec<String> = Vec::new();
+    while let Some(a) = args.next() {
+        if a == "--config" || a == "-c" {
+            config_path = args.next();
+        } else {
+            legacy.push(a);
+        }
+    }
+    if let Some(p) = config_path {
+        return load_toml(&p);
+    }
+    if Path::new("bridge.toml").exists() {
+        return load_toml("bridge.toml");
+    }
+    if !legacy.is_empty() {
+        return BridgeConfig {
+            connection: ConnectionCfg {
+                id: legacy[0].clone(),
+                password: legacy.get(1).cloned().unwrap_or_default(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+    }
+    eprintln!(
+        "usage: bridge [--config <file>] | <peer-id> [password]\n        (reads ./bridge.toml by default)"
+    );
+    std::process::exit(2);
+}
+
+fn load_toml(path: &str) -> BridgeConfig {
+    let s = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("[bridge] read {path}: {e}");
+        std::process::exit(1);
+    });
+    toml::from_str(&s).unwrap_or_else(|e| {
+        eprintln!("[bridge] parse {path}: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn build_peer(c: &ConnectionCfg) -> String {
+    let mut p = c.id.clone();
+    if let Some(s) = &c.server {
+        p.push('@');
+        p.push_str(s);
+        if let Some(k) = &c.key {
+            p.push_str("?key=");
+            p.push_str(k);
+        }
+    }
+    p
+}
+
+fn apply_video(session: &Session<BridgeHandler>, v: &VideoCfg) {
+    match v.quality.as_str() {
+        "custom" => session.save_custom_image_quality(v.custom_quality),
+        q if !q.is_empty() => session.save_image_quality(q.to_string()),
+        _ => {}
+    }
+    if let Some(fps) = v.fps {
+        session.set_custom_fps(fps);
+    }
+}
+
+// ---- PRNG (humanization) -------------------------------------------------
+
 struct Rng(u64);
 impl Rng {
     fn new() -> Self {
@@ -65,6 +214,8 @@ impl Rng {
         lo + (self.u64() % (hi - lo) as u64) as i32
     }
 }
+
+// ---- session handler -----------------------------------------------------
 
 #[derive(Clone, Default)]
 struct BridgeHandler {
@@ -147,11 +298,13 @@ struct BridgeState {
 }
 
 pub fn run() {
-    let mut args = std::env::args().skip(1);
-    let peer_id = args.next().unwrap_or_else(|| "192.168.1.50".to_string());
-    let password = args.next().unwrap_or_default();
-    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_PORT);
-    eprintln!("[bridge] peer={peer_id} port={port}");
+    let cfg = load_cfg_or_exit();
+    let port = cfg.ipc.port;
+    let peer = build_peer(&cfg.connection);
+    eprintln!(
+        "[bridge] peer={peer} server={} port={port}",
+        cfg.connection.server.as_deref().unwrap_or("(default)")
+    );
 
     let handler = BridgeHandler::default();
     let latest = handler.latest.clone();
@@ -159,7 +312,7 @@ pub fn run() {
     let error = handler.error.clone();
 
     let session: Session<BridgeHandler> = Session {
-        password,
+        password: cfg.connection.password.clone(),
         ui_handler: handler,
         server_keyboard_enabled: Arc::new(RwLock::new(true)),
         server_file_transfer_enabled: Arc::new(RwLock::new(true)),
@@ -171,7 +324,11 @@ pub fn run() {
         .lc
         .write()
         .unwrap()
-        .initialize(peer_id, ConnType::DEFAULT_CONN, None, false, None, None, None);
+        .initialize(peer.clone(), ConnType::DEFAULT_CONN, None, false, None, None, None);
+
+    // Video quality/fps — applied before connect; send() is a no-op pre-connection,
+    // the config is persisted and read when io_loop builds the OptionMessage.
+    apply_video(&session, &cfg.video);
 
     let round = session.connection_round_state.lock().unwrap().new_round();
     let s = session.clone();

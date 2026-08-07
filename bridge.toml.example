@@ -1,0 +1,24 @@
+# mhxy-buy bridge config. Copy to bridge.toml (next to the `bridge` binary) and fill in.
+# All fields optional except connection.id.
+
+[connection]
+# Host's RustDesk peer ID (required).
+id = "123456789"
+# Self-hosted hbbs domain (omit to use the public/default server).
+server = "hbbs.example.com"
+# hbbs public key (only if your self-hosted server uses a key; omit otherwise).
+key = ""
+# Host's preset RustDesk password.
+password = "your-host-password"
+
+[video]
+# best | balanced | low | custom  (lower = smaller frames / lower latency, good for sniping)
+quality = "balanced"
+# 0..100, used only when quality = "custom"
+custom_quality = 50
+# frames per second (best-effort; may be capped by the host)
+fps = 30
+
+[ipc]
+# local TCP port the Python brain connects to
+port = 21567

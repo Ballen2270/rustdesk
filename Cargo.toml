@@ -54,6 +54,7 @@ scrap = { path = "libs/scrap", features = ["wayland"] }
 hbb_common = { path = "libs/hbb_common" }
 serde_derive = "1.0"
 serde = "1.0"
+toml = "0.8" # mhxy-buy bridge config
 serde_json = "1.0"
 serde_repr = "0.1"
 cfg-if = "1.0"
