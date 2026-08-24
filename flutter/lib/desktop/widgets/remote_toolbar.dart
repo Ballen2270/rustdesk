@@ -794,7 +794,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
             isHorizontal: isHorizontal,
             multiEdgeEnabled: _multiEdgeEnabled.value,
             toolbarState: widget.state,
-            setFullscreen: _setFullscreen,
             setMinimize: _minimize,
             borderRadius: borderRadius,
           ),
@@ -3174,7 +3173,6 @@ class _DraggableShowHide extends StatefulWidget {
   final ToolbarState toolbarState;
   final BorderRadius borderRadius;
 
-  final Function(bool) setFullscreen;
   final Function() setMinimize;
 
   const _DraggableShowHide({
@@ -3193,7 +3191,6 @@ class _DraggableShowHide extends StatefulWidget {
     required this.multiEdgeEnabled,
     required this.dragging,
     required this.toolbarState,
-    required this.setFullscreen,
     required this.setMinimize,
     required this.borderRadius,
   }) : super(key: key);
@@ -3440,21 +3437,6 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
         Obx(() => collapse.isTrue
             ? _MinimizedMonitorSwitchButton(id: widget.id, ffi: widget.ffi)
             : const Offstage()),
-        Obx(() => buttonWrapper(
-              () {
-                widget.setFullscreen(!isFullscreen.value);
-              },
-              Tooltip(
-                message: translate(
-                    isFullscreen.isTrue ? 'Exit Fullscreen' : 'Fullscreen'),
-                child: Icon(
-                  isFullscreen.isTrue
-                      ? Icons.fullscreen_exit
-                      : Icons.fullscreen,
-                  size: iconSize,
-                ),
-              ),
-            )),
         if (!isMacOS && !isWebDesktop)
           Obx(() => Offstage(
                 offstage: isFullscreen.isFalse,
