@@ -3434,9 +3434,6 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
       mainAxisSize: MainAxisSize.min,
       children: [
         _buildDraggable(context),
-        Obx(() => collapse.isTrue
-            ? _MinimizedMonitorSwitchButton(id: widget.id, ffi: widget.ffi)
-            : const Offstage()),
         if (!isMacOS && !isWebDesktop)
           Obx(() => Offstage(
                 offstage: isFullscreen.isFalse,
@@ -3580,75 +3577,5 @@ class EdgeThicknessControl extends StatelessWidget {
     );
 
     return slider;
-  }
-}
-
-class _MinimizedMonitorSwitchButton extends StatelessWidget {
-  final String id;
-  final FFI ffi;
-
-  const _MinimizedMonitorSwitchButton({
-    Key? key,
-    required this.id,
-    required this.ffi,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    const double iconSize = 20;
-    final cycle = _MonitorCycle(id, ffi);
-
-    return Obx(() {
-      final label = cycle.label;
-      if (!mainGetLocalBoolOptionSync(kOptionAllowMonitorSwitchMainToolbar) ||
-          !mainGetLocalBoolOptionSync(kOptionAllowMonitorSwitchMinToolbar)) {
-        return const Offstage();
-      }
-      if (cycle.total < 2) return const Offstage();
-      final privacyModeState = PrivacyModeState.find(id);
-      if (privacyModeState.isNotEmpty &&
-          !allowDisplaySwitchInPrivacyMode(
-              ffi.ffiModel.pi, privacyModeState.value)) {
-        return const Offstage();
-      }
-
-      return Tooltip(
-        message: cycle.tooltip,
-        child: TextButton(
-          onPressed: cycle.next,
-          style: ButtonStyle(
-            minimumSize: MaterialStateProperty.all(const Size(0, 0)),
-            padding: MaterialStateProperty.all(EdgeInsets.zero),
-            backgroundColor: MaterialStateProperty.resolveWith((states) {
-              if (states.contains(MaterialState.hovered)) {
-                return _ToolbarTheme.blueColor.withOpacity(0.15);
-              }
-              return null;
-            }),
-          ),
-          child: Stack(
-            alignment: const Alignment(0, -0.125),
-            children: [
-              SvgPicture.asset(
-                'assets/display_switcher.svg',
-                colorFilter:
-                    ColorFilter.mode(_ToolbarTheme.blueColor, BlendMode.srcIn),
-                width: iconSize,
-                height: iconSize,
-              ),
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 9,
-                  height: 1,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    });
   }
 }
