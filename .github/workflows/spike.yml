@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
 
 env:
-  MAC_RUST_VERSION: "1.81"
+  MAC_RUST_VERSION: "stable" # new webrtc deps (webrtc-util 0.12) need rustc >= 1.87
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 

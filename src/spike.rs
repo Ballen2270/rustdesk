@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use crate::client::{Data, Interface, QualityStatus};
 use crate::ui_session_interface::{io_loop, InvokeUiSession, Session};
-use hbb_common::message_proto::{
+use base::message_proto::{
     CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay, TerminalResponse,
     WindowsSession,
 };

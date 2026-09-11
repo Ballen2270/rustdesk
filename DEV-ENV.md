@@ -10,7 +10,7 @@
 | 组件 | 位置 | 说明 |
 |---|---|---|
 | Xcode Command Line Tools | `/Library/Developer/CommandLineTools` | **原本就有**，未新装。clang 17 + libclang（bindgen 用），rust 编译器后端 |
-| Rust 工具链 (1.81) | `~/.rustup`、`~/.cargo` | `brew install rustup`（二进制名是 `rustup`，**不是** rustup-init）→ `rustup toolchain install 1.81 && rustup default 1.81`；brew 版不会自动建 `~/.cargo/bin` 代理，需手动把 `~/.rustup/toolchains/1.81-aarch64-apple-darwin/bin/*` 软链过去。1.81 与 [spike.yml](.github/workflows/spike.yml) CI 一致（仓库 MSRV 1.75） |
+| Rust 工具链 (stable, 现 1.98) | `~/.rustup`、`~/.cargo` | `brew install rustup`（二进制名是 `rustup`，**不是** rustup-init）→ `rustup toolchain install stable`；brew 版不会自动建 `~/.cargo/bin` 代理，需手动把 `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin/*` 软链过去。**2026-09 起必须 ≥1.87**：上游合并的 webrtc-util 0.12 用了 `usize::is_multiple_of`（1.87 稳定），旧的 1.81 编不过（仓库 Cargo.toml 的 MSRV 1.75 已过时，上游 CI 也用 stable） |
 | vcpkg（pinned baseline） | `~/vcpkg` | `git clone` 后 checkout `120deac3062162151622ca4860575a33844ba10b`（= [vcpkg.json](vcpkg.json) baseline），`bootstrap-vcpkg.sh` |
 | vcpkg 库 | `~/vcpkg/installed/arm64-osx` | classic 模式：`libvpx libyuv opus aom`（bridge 用不到 ffmpeg，跳过 manifest 全量） |
 | nasm、cmake、pkg-config | brew | **实测必需**：nasm 为 aom port 所需（`vcpkg_find_acquire_program(NASM)`），pkg-config 为 `vcpkg_fixup_pkgconfig` 收尾步骤所需 |
