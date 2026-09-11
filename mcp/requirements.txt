@@ -1,0 +1,5 @@
+mcp>=2.0.0
+pillow>=10.0.0
+# macOS only — Apple Vision OCR backend for the ocr / tap_text tools
+pyobjc-framework-Vision>=12.0
+pyobjc-framework-Quartz>=12.0

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "rustdesk": {
+      "command": "/opt/homebrew/Caskroom/miniconda/base/envs/rustdesk-mcp/bin/python",
+      "args": ["mcp/rustdesk_mcp.py"],
+      "env": {
+        "RUSTDESK_BRIDGE_HOST": "127.0.0.1",
+        "RUSTDESK_BRIDGE_PORT": "21567",
+        "RUSTDESK_BRIDGE_BIN": "target/release/bridge",
+        "RUSTDESK_BRIDGE_CONFIG": "bridge.toml",
+        "RUSTDESK_SCREENSHOT_DIR": "~/rustdesk-screenshots",
+        "RUSTDESK_IDLE_TIMEOUT": "600"
+      }
+    }
+  }
+}

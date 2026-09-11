@@ -187,7 +187,9 @@ pub fn run() {
     };
     eprintln!("[spike] got frame {w}x{h}");
 
-    // macOS decodes to ARGB. Swizzle to RGBA, write PNG via repng.
+    // libyuv format labels name the packed u32 WORD (MSB->LSB); on
+    // little-endian hosts that lands in memory reversed: "ARGB" = bytes
+    // B,G,R,A and "ABGR" = bytes R,G,B,A (same fix as bridge.rs swizzle).
     // Assumes packed rows (stride = w*4); if the decoder pads rows the PNG will
     // look skewed — fix by respecting `align` then.
     let mut rgba = Vec::with_capacity(w * h * 4);
@@ -199,18 +201,11 @@ pub fn run() {
                 if i + 3 >= raw.len() {
                     break;
                 }
-                let (a, r, g, b) = (raw[i], raw[i + 1], raw[i + 2], raw[i + 3]);
-                rgba.extend_from_slice(&[r, g, b, a]);
+                rgba.extend_from_slice(&[raw[i + 2], raw[i + 1], raw[i], raw[i + 3]]);
             }
         }
         ImageFormat::ABGR => {
-            for i in (0..n).step_by(4) {
-                if i + 3 >= raw.len() {
-                    break;
-                }
-                let (a, b, g, r) = (raw[i], raw[i + 1], raw[i + 2], raw[i + 3]);
-                rgba.extend_from_slice(&[r, g, b, a]);
-            }
+            rgba.extend_from_slice(&raw);
         }
         _ => {
             eprintln!("[spike] unsupported fmt, dumping raw");

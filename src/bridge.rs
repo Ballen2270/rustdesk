@@ -4,9 +4,18 @@
 // host connection (self-hosted hbbs supported via id/server/key) and video
 // quality, then keeps a headless RustDesk Session alive and serves a local TCP
 // IPC for the Python brain:
-//   request  : one JSON line, e.g.
-//              {"cmd":"frame"} | {"cmd":"tap","x":..,"y":..,"w":..,"h":..}
-//              | {"cmd":"status"} | {"cmd":"quit"}
+//   request  : one JSON line, e.g. {"cmd":...} plus params:
+//     frame   {}                            -> latest decoded frame (binary reply)
+//     status  {}                            -> {"connected",w,h,seq,"pending_2fa"} (seq = frame counter)
+//     send_2fa {code,trust?}                -> answer the host's 2FA challenge (msgbox "input-2fa")
+//     tap     {x,y,w,h}                     -> humanized left click inside rect
+//     move    {x,y}                         -> plain cursor move
+//     click   {x,y,button?,double?,humanize?} -> click at point; button left|right|middle
+//     drag    {x1,y1,x2,y2}                 -> humanized left-button drag
+//     scroll  {dx,dy,x?,y?}                 -> wheel deltas (dy>0 scrolls down); optional x,y = move first
+//     key     {name,alt?,ctrl?,shift?,meta?} -> key tap; name is a single char or VK_* (VK_RETURN, ...)
+//     type    {text}                        -> server-side whole-string injection
+//     quit    {}                            -> close session & exit
 //   response : [type:u8][len:u32 BE][payload]
 //              type 0x01 = JSON(UTF8);  type 0x02 = frame ([w:u32][h:u32][RGBA bytes])
 //
@@ -18,7 +27,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,8 +47,11 @@ const DEFAULT_PORT: u16 = 21567;
 const MOUSE_TYPE_MOVE: i32 = 0;
 const MOUSE_TYPE_DOWN: i32 = 1;
 const MOUSE_TYPE_UP: i32 = 2;
+const MOUSE_TYPE_WHEEL: i32 = 3;
 const MOUSE_TYPE_MOVE_RELATIVE: i32 = 5;
 const MOUSE_BUTTON_LEFT: i32 = 1;
+const MOUSE_BUTTON_RIGHT: i32 = 2;
+const MOUSE_BUTTON_WHEEL: i32 = 4; // middle button
 fn left_down() -> i32 {
     MOUSE_TYPE_DOWN | (MOUSE_BUTTON_LEFT << 3)
 }
@@ -220,20 +232,30 @@ impl Rng {
 #[derive(Clone, Default)]
 struct BridgeHandler {
     latest: Arc<Mutex<Option<(Vec<u8>, usize, usize, ImageFormat)>>>,
+    // Monotonic decoded-frame counter; lets a caller request "a frame newer
+    // than the one I last saw" and detect a stale (pre-action) capture.
+    seq: Arc<AtomicU64>,
     peer_info: Arc<RwLock<Option<PeerInfo>>>,
     error: Arc<Mutex<Option<String>>>,
+    // Set while the host is waiting for a 2FA code (msgbox "input-2fa");
+    // cleared by the `send_2fa` IPC command or on successful login.
+    pending_2fa: Arc<Mutex<bool>>,
 }
 
 impl InvokeUiSession for BridgeHandler {
     fn on_rgba(&self, _display: usize, rgba: &mut ImageRgb) {
+        self.seq.fetch_add(1, Ordering::Relaxed);
         *self.latest.lock().unwrap() = Some((rgba.raw.clone(), rgba.w, rgba.h, rgba.fmt));
     }
     fn set_peer_info(&self, pi: &PeerInfo) {
+        *self.pending_2fa.lock().unwrap() = false;
         *self.peer_info.write().unwrap() = Some(pi.clone());
     }
     fn msgbox(&self, t: &str, title: &str, text: &str, _link: &str, _retry: bool) {
         eprintln!("[bridge] msgbox type={t} title={title} text={text}");
-        if t == "error" {
+        if t == "input-2fa" {
+            *self.pending_2fa.lock().unwrap() = true;
+        } else if t == "error" {
             *self.error.lock().unwrap() = Some(format!("{title}: {text}"));
         }
     }
@@ -292,8 +314,13 @@ impl InvokeUiSession for BridgeHandler {
 
 struct BridgeState {
     latest: Arc<Mutex<Option<(Vec<u8>, usize, usize, ImageFormat)>>>,
+    seq: Arc<AtomicU64>,
     peer_info: Arc<RwLock<Option<PeerInfo>>>,
     error: Arc<Mutex<Option<String>>>,
+    pending_2fa: Arc<Mutex<bool>>,
+    // Last position the cursor was sent to; lets humanized moves interpolate
+    // from the real start point instead of assuming (0,0).
+    mouse: Arc<Mutex<(i32, i32)>>,
     session: Session<BridgeHandler>,
 }
 
@@ -308,8 +335,10 @@ pub fn run() {
 
     let handler = BridgeHandler::default();
     let latest = handler.latest.clone();
+    let seq = handler.seq.clone();
     let peer_info = handler.peer_info.clone();
     let error = handler.error.clone();
+    let pending_2fa = handler.pending_2fa.clone();
 
     let session: Session<BridgeHandler> = Session {
         password: cfg.connection.password.clone(),
@@ -338,8 +367,11 @@ pub fn run() {
 
     let state = Arc::new(BridgeState {
         latest,
+        seq,
         peer_info,
         error,
+        pending_2fa,
+        mouse: Arc::new(Mutex::new((0, 0))),
         session,
     });
 
@@ -412,8 +444,91 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
             "tap" => {
                 let get = |k: &str| req.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 let (tx, ty) = humanized_tap(&state.session, get("x"), get("y"), get("w"), get("h"));
+                *state.mouse.lock().unwrap() = (tx, ty);
                 let msg = format!("{{\"ok\":true,\"x\":{tx},\"y\":{ty}}}");
                 write_msg(&mut writer, 0x01, msg.as_bytes())?;
+            }
+            "move" => {
+                let get = |k: &str| req.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                humanized_move(&state.session, &state.mouse, get("x"), get("y"));
+                write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+            }
+            "click" => {
+                let get = |k: &str| req.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let getb = |k: &str| req.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+                let button = match req.get("button").and_then(|v| v.as_str()).unwrap_or("left") {
+                    "right" => MOUSE_BUTTON_RIGHT,
+                    "middle" => MOUSE_BUTTON_WHEEL,
+                    _ => MOUSE_BUTTON_LEFT,
+                };
+                let (tx, ty) = humanized_click(
+                    &state.session,
+                    button,
+                    get("x"),
+                    get("y"),
+                    getb("humanize"),
+                );
+                *state.mouse.lock().unwrap() = (tx, ty);
+                if getb("double") {
+                    std::thread::sleep(Duration::from_millis(80));
+                    press_button(&state.session, button, tx, ty);
+                }
+                let msg = format!("{{\"ok\":true,\"x\":{tx},\"y\":{ty}}}");
+                write_msg(&mut writer, 0x01, msg.as_bytes())?;
+            }
+            "drag" => {
+                let get = |k: &str| req.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let (x2, y2) = (get("x2"), get("y2"));
+                humanized_drag(&state.session, get("x1"), get("y1"), x2, y2);
+                *state.mouse.lock().unwrap() = (x2, y2);
+                write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+            }
+            "scroll" => {
+                let get = |k: &str| req.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let (x, y, dx, dy) = (get("x"), get("y"), get("dx"), get("dy"));
+                // Wheel events carry no position; optionally move first so the
+                // scroll happens under the given point.
+                if x != 0 || y != 0 {
+                    humanized_move(&state.session, &state.mouse, x, y);
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                // Wire convention (matches the flutter client): a NEGATIVE
+                // wheel delta scrolls down/right, so negate the natural dy>0=down.
+                state.session.send_mouse(
+                    MOUSE_TYPE_WHEEL,
+                    -dx,
+                    -dy,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
+                write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+            }
+            "key" => {
+                let getb = |k: &str| req.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+                let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    write_msg(&mut writer, 0x01, b"{\"ok\":false,\"err\":\"missing name\"}")?;
+                } else {
+                    // press=true -> single down+up event; modifiers ride along
+                    // in the same KeyEvent (Legacy mode).
+                    state.session.input_key(
+                        name,
+                        false,
+                        true,
+                        getb("alt"),
+                        getb("ctrl"),
+                        getb("shift"),
+                        getb("meta"),
+                    );
+                    write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+                }
+            }
+            "type" => {
+                let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                state.session.input_string(text);
+                write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
             }
             "status" => {
                 let pi = state.peer_info.read().unwrap().clone();
@@ -424,8 +539,26 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
                     .map(|d| (d.width, d.height))
                     .unwrap_or((0, 0));
                 let connected = pi.is_some() && err.is_none();
-                let msg = format!("{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h}}}");
+                let seq = state.seq.load(Ordering::Relaxed);
+                let pending_2fa = *state.pending_2fa.lock().unwrap();
+                let msg = format!(
+                    "{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h},\"seq\":{seq},\"pending_2fa\":{pending_2fa}}}"
+                );
                 write_msg(&mut writer, 0x01, msg.as_bytes())?;
+            }
+            "send_2fa" => {
+                let code = req.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                let trust = req.get("trust").and_then(|v| v.as_bool()).unwrap_or(true);
+                if code.is_empty() {
+                    write_msg(&mut writer, 0x01, b"{\"ok\":false,\"err\":\"missing code\"}")?;
+                } else {
+                    // With trust=true the host can mark this device trusted and
+                    // skip 2FA on future connections (if it enables trusted
+                    // devices). A wrong code makes the host re-challenge.
+                    state.session.send2fa(code.to_string(), trust);
+                    *state.pending_2fa.lock().unwrap() = false;
+                    write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+                }
             }
             "quit" => {
                 write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
@@ -442,6 +575,10 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
 }
 
 fn swizzle_rgba(raw: &[u8], w: usize, h: usize, fmt: ImageFormat) -> Vec<u8> {
+    // libyuv (and scrap's ImageFormat) name the packed u32 WORD (MSB->LSB);
+    // on little-endian hosts that lands in memory reversed: "ARGB" = bytes
+    // B,G,R,A and "ABGR" = bytes R,G,B,A. Reading the label as byte order put
+    // the constant-0xFF alpha into the blue channel, tinting frames purple.
     let n = w * h * 4;
     let mut out = Vec::with_capacity(n);
     match fmt {
@@ -450,19 +587,10 @@ fn swizzle_rgba(raw: &[u8], w: usize, h: usize, fmt: ImageFormat) -> Vec<u8> {
                 if i + 3 >= raw.len() {
                     break;
                 }
-                let (a, r, g, b) = (raw[i], raw[i + 1], raw[i + 2], raw[i + 3]);
-                out.extend_from_slice(&[r, g, b, a]);
+                out.extend_from_slice(&[raw[i + 2], raw[i + 1], raw[i], raw[i + 3]]);
             }
         }
-        ImageFormat::ABGR => {
-            for i in (0..n).step_by(4) {
-                if i + 3 >= raw.len() {
-                    break;
-                }
-                let (a, b, g, r) = (raw[i], raw[i + 1], raw[i + 2], raw[i + 3]);
-                out.extend_from_slice(&[r, g, b, a]);
-            }
-        }
+        // "ABGR" words are already R,G,B,A bytes on little-endian
         _ => out.extend_from_slice(raw),
     }
     out
@@ -488,4 +616,100 @@ fn humanized_tap(session: &Session<BridgeHandler>, x: i32, y: i32, w: i32, h: i3
     std::thread::sleep(Duration::from_millis(rng.range(35, 95) as u64));
     session.send_mouse(left_up(), tx, ty, false, false, false, false);
     (tx, ty)
+}
+
+// Button press (down + up) at a fixed point with jittered hold time.
+fn press_button(session: &Session<BridgeHandler>, button: i32, x: i32, y: i32) {
+    let mut rng = Rng::new();
+    session.send_mouse(
+        MOUSE_TYPE_DOWN | (button << 3),
+        x,
+        y,
+        false,
+        false,
+        false,
+        false,
+    );
+    std::thread::sleep(Duration::from_millis(rng.range(35, 95) as u64));
+    session.send_mouse(MOUSE_TYPE_UP | (button << 3), x, y, false, false, false, false);
+}
+
+// Humanized click at a point: random landing within a few px, a short
+// off->on approach travel, jittered press timing. Returns the landing point.
+fn humanized_click(
+    session: &Session<BridgeHandler>,
+    button: i32,
+    x: i32,
+    y: i32,
+    humanize: bool,
+) -> (i32, i32) {
+    let mut rng = Rng::new();
+    let (tx, ty) = if humanize {
+        (x + rng.range(-4, 4), y + rng.range(-4, 4))
+    } else {
+        (x, y)
+    };
+    if humanize {
+        let (off_x, off_y) = (rng.range(5, 14), rng.range(5, 14));
+        session.send_mouse(
+            MOUSE_TYPE_MOVE,
+            tx - off_x,
+            ty - off_y,
+            false,
+            false,
+            false,
+            false,
+        );
+        std::thread::sleep(Duration::from_millis(rng.range(25, 55) as u64));
+    }
+    session.send_mouse(MOUSE_TYPE_MOVE, tx, ty, false, false, false, false);
+    std::thread::sleep(Duration::from_millis(rng.range(15, 40) as u64));
+    press_button(session, button, tx, ty);
+    (tx, ty)
+}
+
+// Humanized cursor move: a jittered multi-step travel from the last known
+// cursor position to (x, y) with randomized step timing — no teleport.
+fn humanized_move(session: &Session<BridgeHandler>, mouse: &Arc<Mutex<(i32, i32)>>, x: i32, y: i32) {
+    let mut rng = Rng::new();
+    let (sx, sy) = *mouse.lock().unwrap();
+    let steps = rng.range(6, 12);
+    for i in 1..=steps {
+        let px = sx + (x - sx) * i / steps + rng.range(-1, 2);
+        let py = sy + (y - sy) * i / steps + rng.range(-1, 2);
+        session.send_mouse(MOUSE_TYPE_MOVE, px, py, false, false, false, false);
+        std::thread::sleep(Duration::from_millis(rng.range(15, 40) as u64));
+    }
+    session.send_mouse(MOUSE_TYPE_MOVE, x, y, false, false, false, false);
+    *mouse.lock().unwrap() = (x, y);
+}
+
+// Humanized left-button drag from (x1,y1) to (x2,y2): approach, press, a
+// jittered multi-step travel, then release.
+fn humanized_drag(session: &Session<BridgeHandler>, x1: i32, y1: i32, x2: i32, y2: i32) {
+    let mut rng = Rng::new();
+    let (off_x, off_y) = (rng.range(5, 14), rng.range(5, 14));
+    session.send_mouse(
+        MOUSE_TYPE_MOVE,
+        x1 - off_x,
+        y1 - off_y,
+        false,
+        false,
+        false,
+        false,
+    );
+    std::thread::sleep(Duration::from_millis(rng.range(25, 55) as u64));
+    session.send_mouse(MOUSE_TYPE_MOVE, x1, y1, false, false, false, false);
+    std::thread::sleep(Duration::from_millis(rng.range(15, 40) as u64));
+    session.send_mouse(left_down(), x1, y1, false, false, false, false);
+    std::thread::sleep(Duration::from_millis(rng.range(40, 90) as u64));
+    let steps = rng.range(8, 14);
+    for i in 1..=steps {
+        let px = x1 + (x2 - x1) * i / steps + rng.range(-1, 2);
+        let py = y1 + (y2 - y1) * i / steps + rng.range(-1, 2);
+        session.send_mouse(MOUSE_TYPE_MOVE, px, py, false, false, false, false);
+        std::thread::sleep(Duration::from_millis(rng.range(20, 45) as u64));
+    }
+    std::thread::sleep(Duration::from_millis(rng.range(30, 80) as u64));
+    session.send_mouse(left_up(), x2, y2, false, false, false, false);
 }
