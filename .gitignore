@@ -58,5 +58,8 @@ libsciter.dylib
 flutter/web/
 # local bridge config (contains peer password) — example stays tracked
 /bridge.toml
+# local fleet config + per-device tomls (contain peer passwords) — examples stay tracked
+/mcp/devices.toml
+/mcp/devices/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/

@@ -104,13 +104,50 @@ port = 21567                   # 本地 IPC 端口
 | `RUSTDESK_BRIDGE_CONFIG` | 空 | 拉起时传给 `--config` 的 toml |
 | `RUSTDESK_SCREENSHOT_DIR` | `~/rustdesk-screenshots` | 截图落盘目录；空 = 不落盘 |
 | `RUSTDESK_IDLE_TIMEOUT` | `600` | 空闲睡眠阈值（秒）；`0` 关闭 |
+| `RUSTDESK_DEVICES_CONFIG` | 空 | **fleet 模式**：指向 `mcp/devices.toml` 启用多设备（见下）；空 = 单设备模式 |
 
-多设备：复制多份 `.mcp.json` 条目（不同 `RUSTDESK_BRIDGE_PORT` + 不同 toml），
-每台设备一个独立命名的 server。
+### 多设备（fleet 模式）
+
+设备配置的完整指南（添加设备、字段含义、规则）见 [DEVICES.md](DEVICES.md)。
+
+一个 MCP server 同时控制 N 台设备：每台设备一个**独立 bridge 进程**（独立端口 +
+独立 toml，格式不变），所有设备类工具加 `device` 参数路由，如
+`click(device="pc1", x, y)`。启用：`.mcp.json` 里把 `RUSTDESK_DEVICES_CONFIG` 设为
+`mcp/devices.toml`（已 gitignore），然后：
+
+```sh
+mkdir -p mcp/devices
+cp mcp/devices.toml.example mcp/devices.toml      # 设备清单
+cp bridge.toml.example mcp/devices/pc1.toml       # 每台的连接配置（[ipc] port 对应）
+# 注意：devices.toml 里每个 [[device]] 的 config 文件都必须存在——
+# 没配好的设备先把它那一段整块删掉，否则启动即报错
+```
+
+生命周期（**每设备独立**，一台睡/崩/重启不影响其他台）：
+
+- **按需唤醒**：第一次对该设备的调用才拉起 bridge（`autostart = true` 改为启动即连）
+- **租约续时**：每次调用自动续 `idle_timeout`（默认 600s 无活动自动断开、释放对端；
+  下次调用 ~2-8s 重连）
+- **`keep_alive(device, minutes)`**：显式续时——远端挂机脚本在跑但本地没有工具调用时
+  用它保活，可越过 `max_duration` 硬上限
+- **`stop_bridge(device)`**：干完活立即断开该设备
+- **`list_devices()`**：总览（连接状态 + 剩余租约），探测**不唤醒**任何设备
+- 手动起的外部 bridge 只复用，绝不杀、绝不休眠（连 `quit` 都不发）
+
+同一设备内动作串行（按下/释放不交错），跨设备完全并行。Rust 侧零改动。
+旧方案（复制多份 `.mcp.json` 条目、每设备一个 server）仍然可用，但 fleet 模式
+一个 server 即可。
+
+fleet 的自动化测试（占 21601-21603 端口，用 dummy 对端）：
+
+```sh
+conda run -n rustdesk-mcp python mcp/test_fleet.py
+```
 
 ---
 
-## 三、工具列表（12 个）
+## 三、工具列表（14 个；fleet 模式下另加 `list_devices` / `keep_alive`，
+且所有设备类工具多一个必填的 `device` 参数）
 
 | 工具 | 参数 | 说明 |
 |---|---|---|

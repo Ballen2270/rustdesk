@@ -23,6 +23,12 @@ Env:
                           (relative paths resolve against the repo root). Leave empty
                           to never spawn and require an already-running bridge.
   RUSTDESK_BRIDGE_CONFIG  TOML passed as `--config` when spawning (e.g. bridge.toml).
+  RUSTDESK_DEVICES_CONFIG Fleet mode: a devices.toml describing N devices, each
+                          with its own bridge process/port/child TOML (see
+                          bridge_fleet.py / devices.toml.example). When set, the
+                          tools above are replaced by device-scoped versions
+                          taking a `device` argument; unset = single-device mode
+                          exactly as before.
 
 Run (after `pip install -r requirements.txt`):
   python3 mcp/rustdesk_mcp.py          # speaks MCP over stdio
@@ -250,11 +256,20 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return buf
 
 
+class _ConnectFailure(OSError):
+    """Connect-phase failure: the command was never delivered, so retrying
+    (after bringing the bridge back up) cannot duplicate an action."""
+
+
 def _ipc_once(request: dict[str, Any]) -> tuple[int, bytes]:
     """One command, one reply, no recovery. Returns (type, payload):
     0x01 JSON, 0x02 frame. Every bridge command resets the idle timer."""
     _touch()
-    with socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=5.0) as sock:
+    try:
+        sock = socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=5.0)
+    except OSError as exc:
+        raise _ConnectFailure(str(exc)) from exc
+    with sock:
         sock.settimeout(IPC_TIMEOUT_S)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.sendall((json.dumps(request) + "\n").encode())
@@ -265,11 +280,14 @@ def _ipc_once(request: dict[str, Any]) -> tuple[int, bytes]:
 
 
 def _ipc(request: dict[str, Any]) -> tuple[int, bytes]:
-    """_ipc_once with auto-recovery: if the bridge is not accepting
-    connections (never started, or crashed), bring one up first."""
+    """_ipc_once with auto-recovery — but ONLY for connect-phase failures
+    (bridge not accepting connections: never started, slept, or crashed):
+    the command was never delivered, so the retry cannot duplicate it. A
+    failure AFTER the socket connected (send/recv) leaves delivery unknown —
+    surface it and let the caller decide whether repeating is safe."""
     try:
         return _ipc_once(request)
-    except OSError:
+    except _ConnectFailure:
         _ensure_bridge()
         return _ipc_once(request)
 
@@ -728,11 +746,20 @@ async def wait(seconds: float) -> str:
 
 
 if __name__ == "__main__":
-    # Warm up eagerly (spawn/reuse the bridge) so the first tool call is fast;
-    # failure is non-fatal — tools will retry via _ipc and surface a real error.
-    try:
-        _ensure_bridge()
-    except Exception as exc:  # noqa: BLE001 — best-effort warm-up
-        print(f"[rustdesk-mcp] warm-up: {exc}", file=sys.stderr)
-    threading.Thread(target=_idle_watchdog, name="idle-watchdog", daemon=True).start()
+    # Fleet mode (RUSTDESK_DEVICES_CONFIG -> devices.toml): one MCP server, N
+    # devices, each with its own bridge process. bridge_fleet replaces the
+    # single-device tools registered above with device-scoped versions and
+    # runs its own watchdog/warm-up; the single-device path below is skipped.
+    if os.environ.get("RUSTDESK_DEVICES_CONFIG"):
+        from bridge_fleet import run_fleet_server
+
+        run_fleet_server(server)
+    else:
+        # Warm up eagerly (spawn/reuse the bridge) so the first tool call is fast;
+        # failure is non-fatal — tools will retry via _ipc and surface a real error.
+        try:
+            _ensure_bridge()
+        except Exception as exc:  # noqa: BLE001 — best-effort warm-up
+            print(f"[rustdesk-mcp] warm-up: {exc}", file=sys.stderr)
+        threading.Thread(target=_idle_watchdog, name="idle-watchdog", daemon=True).start()
     server.run()  # stdio transport

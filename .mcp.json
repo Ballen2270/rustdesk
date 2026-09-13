@@ -9,7 +9,8 @@
         "RUSTDESK_BRIDGE_BIN": "target/release/bridge",
         "RUSTDESK_BRIDGE_CONFIG": "bridge.toml",
         "RUSTDESK_SCREENSHOT_DIR": "~/rustdesk-screenshots",
-        "RUSTDESK_IDLE_TIMEOUT": "600"
+        "RUSTDESK_IDLE_TIMEOUT": "600",
+        "RUSTDESK_DEVICES_CONFIG": "mcp/devices.toml"
       }
     }
   }

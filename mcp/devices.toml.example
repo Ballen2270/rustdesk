@@ -1,0 +1,35 @@
+# Fleet mode: ONE MCP server controlling N remote devices, each via its own
+# bridge process (own IPC port + own child TOML). Copy to mcp/devices.toml
+# (gitignored — child TOMLs contain passwords) and set
+# RUSTDESK_DEVICES_CONFIG=mcp/devices.toml in .mcp.json.
+#
+# Child TOMLs use the single-device format ([connection]/[video]/[ipc], see
+# bridge.toml.example). Each device's [ipc] port MUST equal its port here.
+# Every [[device]]'s config file must exist — delete the whole [[device]]
+# block for devices you have not configured yet, or startup fails.
+
+# Optional: bridge binary. Default: the RUSTDESK_BRIDGE_BIN env var.
+# bridge_bin = "target/release/bridge"
+
+[[device]]
+name = "pc1"                     # the `device` argument tools take; unique
+host = "127.0.0.1"               # default loopback
+port = 21567                     # unique per device; must equal pc1.toml [ipc] port
+config = "mcp/devices/pc1.toml"  # single-device toml with the peer's credentials
+autostart = false                # false = connect on first tool call (on-demand)
+idle_timeout = 600               # lease seconds, renewed by EVERY tool call; 0 = never sleep
+max_duration = 0                 # hard cap since spawn even if active; 0 = off; keep_alive() extends
+
+[[device]]
+name = "pc2"
+port = 21568
+config = "mcp/devices/pc2.toml"
+idle_timeout = 600
+
+# Lifecycle summary (per device, fully independent):
+#   - first tool call wakes it (spawn + connect, ~2-8s);
+#   - every call renews the idle_timeout lease;
+#   - keep_alive(device, minutes) extends past idle_timeout AND max_duration
+#     (for unattended remote work with no local tool traffic);
+#   - stop_bridge(device) closes it immediately when you are done;
+#   - external bridges (started manually) are reused, never killed/slept.
