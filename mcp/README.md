@@ -52,7 +52,7 @@ cp bridge.toml.example bridge.toml   # 仓库根目录，已 gitignore
 
 ```toml
 [connection]
-id       = "1791144759"        # 必填。直连填 IP；走服务器填 peer id
+id       = "123456789"        # 必填。直连填 IP；走服务器填 peer id
 server   = "hbbs.example.com:21116"  # 可选，自建 hbbs；省略则用公共/默认服务器
 key      = "..."               # 可选，自建服务器的公钥
 password = "被控端永久密码"      # 被控端 RustDesk → 设置 → 安全 → 永久密码
