@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from PIL import Image
-from jianhui import advance, checkpoint, classify, recognize, shot_name, SLOTS
+from jianhui import advance, checkpoint, classify, recognize, shot_name, validate, SLOTS
 from local_features import BattleAnchors
 
 
@@ -170,6 +170,23 @@ class StateTests(unittest.TestCase):
         self.assertEqual(classify([cancel, item('12', .49,.03)])['state'], 'battle')
         self.assertEqual(classify([cancel])['state'], 'unknown')
         self.assertEqual(classify([cancel, item('12', .1,.03)])['state'], 'unknown')
+
+    def test_per_window_device_validation(self):
+        base = dict(device='pc1', calibrated=True, native_resolution=[1920, 1080],
+                    windows=[dict(name='left', rect=[0, 0, 800, 600], room_keyword='甲'),
+                             dict(name='right', rect=[900, 0, 800, 600], room_keyword='乙')])
+        validate(dict(base, games=1), 1)  # baseline passes
+        ok = dict(base, windows=[dict(base['windows'][0], device='pc1d1'),
+                                 dict(base['windows'][1], device='pc1d2',
+                                      native_resolution=[1280, 720])])
+        validate(dict(ok, games=1), 1)
+        for bad in ('PC1D1', 'has space', 'x/y'):
+            w = [dict(base['windows'][0], device=bad), base['windows'][1]]
+            with self.assertRaises(ValueError):
+                validate(dict(base, windows=w, games=1), 1)
+        w = [base['windows'][0], dict(base['windows'][1], native_resolution=[0, 720])]
+        with self.assertRaises(ValueError):
+            validate(dict(base, windows=w, games=1), 1)
 
     def test_room_timeout_is_configurable(self):
         strict = {'count': 0}

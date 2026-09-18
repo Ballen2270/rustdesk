@@ -1,12 +1,15 @@
 // src/bridge.rs — controller-side bridge (long-running IPC server).
 //
 // Reads ./bridge.toml (or --config <file>, or legacy positional args) for the
-// host connection (self-hosted hbbs supported via id/server/key) and video
-// quality, then keeps a headless RustDesk Session alive and serves a local TCP
-// IPC for the Python brain:
+// host connection (self-hosted hbbs supported via id/server/key), video
+// quality, and an optional `display` index (0-based, auto-switched on
+// connect for multi-display hosts), then keeps a headless RustDesk Session
+// alive and serves a local TCP IPC for the Python brain:
 //   request  : one JSON line, e.g. {"cmd":...} plus params:
 //     frame   {}                            -> latest decoded frame (binary reply)
-//     status  {}                            -> {"connected",w,h,seq,"pending_2fa"} (seq = frame counter)
+//     status  {}                            -> {"connected",w,h,seq,"pending_2fa",
+//                                              display,displays:[{index,x,y,w,h}]}
+//     display {index}                       -> switch which display is streamed (0-based)
 //     send_2fa {code,trust?}                -> answer the host's 2FA challenge (msgbox "input-2fa")
 //     tap     {x,y,w,h}                     -> humanized left click inside rect
 //     move    {x,y}                         -> plain cursor move
@@ -36,8 +39,8 @@ use serde_derive::Deserialize;
 use crate::client::{Data, Interface, QualityStatus};
 use crate::ui_session_interface::{io_loop, InvokeUiSession, Session};
 use base::message_proto::{
-    CursorData, CursorPosition, DisplayInfo, FileEntry, PeerInfo, SwitchDisplay, TerminalResponse,
-    WindowsSession,
+    CaptureDisplays, CursorData, CursorPosition, DisplayInfo, FileEntry, Message, Misc, PeerInfo,
+    SwitchDisplay, TerminalResponse, WindowsSession,
 };
 use hbb_common::rendezvous_proto::ConnType;
 use scrap::{ImageFormat, ImageRgb};
@@ -69,6 +72,10 @@ struct BridgeConfig {
     video: VideoCfg,
     #[serde(default)]
     ipc: IpcCfg,
+    // Display index to stream (0-based). None = the host's default; when set,
+    // the bridge switches to it as soon as the peer info arrives.
+    #[serde(default)]
+    display: Option<i32>,
 }
 impl Default for BridgeConfig {
     fn default() -> Self {
@@ -76,6 +83,7 @@ impl Default for BridgeConfig {
             connection: ConnectionCfg::default(),
             video: VideoCfg::default(),
             ipc: IpcCfg::default(),
+            display: None,
         }
     }
 }
@@ -240,6 +248,11 @@ struct BridgeHandler {
     // Set while the host is waiting for a 2FA code (msgbox "input-2fa");
     // cleared by the `send_2fa` IPC command or on successful login.
     pending_2fa: Arc<Mutex<bool>>,
+    // Multi-display bookkeeping: the host's display list (set_displays), the
+    // index being streamed (switch_display/set_current_display) and its live
+    // geometry (switch_display/set_display).
+    displays: Arc<RwLock<Vec<DisplayInfo>>>,
+    current_display: Arc<Mutex<i32>>,
 }
 
 impl InvokeUiSession for BridgeHandler {
@@ -265,9 +278,37 @@ impl InvokeUiSession for BridgeHandler {
     fn set_cursor_data(&self, _: CursorData) {}
     fn set_cursor_id(&self, _: String) {}
     fn set_cursor_position(&self, _: CursorPosition) {}
-    fn set_display(&self, _: i32, _: i32, _: i32, _: i32, _: bool, _: f64) {}
-    fn switch_display(&self, _: &SwitchDisplay) {}
-    fn set_displays(&self, _: &Vec<DisplayInfo>) {}
+    fn set_display(&self, x: i32, y: i32, w: i32, h: i32, _: bool, _: f64) {
+        let mut displays = self.displays.write().unwrap();
+        let idx = *self.current_display.lock().unwrap();
+        while displays.len() <= idx.max(0) as usize {
+            displays.push(DisplayInfo::default());
+        }
+        if let Some(d) = displays.get_mut(idx.max(0) as usize) {
+            d.x = x;
+            d.y = y;
+            d.width = w;
+            d.height = h;
+        }
+    }
+    fn switch_display(&self, s: &SwitchDisplay) {
+        *self.current_display.lock().unwrap() = s.display;
+        let mut displays = self.displays.write().unwrap();
+        while displays.len() <= s.display as usize {
+            displays.push(DisplayInfo::default());
+        }
+        if let Some(d) = displays.get_mut(s.display as usize) {
+            if s.width > 0 {
+                d.x = s.x;
+                d.y = s.y;
+                d.width = s.width;
+                d.height = s.height;
+            }
+        }
+    }
+    fn set_displays(&self, ds: &Vec<DisplayInfo>) {
+        *self.displays.write().unwrap() = ds.clone();
+    }
     fn set_platform_additions(&self, _: &str) {}
     fn on_connected(&self, _: ConnType) {}
     fn update_privacy_mode(&self) {}
@@ -297,7 +338,9 @@ impl InvokeUiSession for BridgeHandler {
     fn on_voice_call_incoming(&self) {}
     fn next_rgba(&self, _: usize) {}
     fn set_multiple_windows_session(&self, _: Vec<WindowsSession>) {}
-    fn set_current_display(&self, _: i32) {}
+    fn set_current_display(&self, display: i32) {
+        *self.current_display.lock().unwrap() = display;
+    }
     fn update_record_status(&self, _: bool) {}
     fn printer_request(&self, _: i32, _: String) {}
     fn handle_screenshot_resp(&self, _: String, _: String) {}
@@ -321,7 +364,40 @@ struct BridgeState {
     // Last position the cursor was sent to; lets humanized moves interpolate
     // from the real start point instead of assuming (0,0).
     mouse: Arc<Mutex<(i32, i32)>>,
+    displays: Arc<RwLock<Vec<DisplayInfo>>>,
+    current_display: Arc<Mutex<i32>>,
     session: Session<BridgeHandler>,
+}
+
+// Ask the host to stream `display` (0-based): the legacy switch request plus
+// the CaptureDisplays subscription, mirroring the upstream client's sequence.
+// A final refresh forces the host to reset its capture/encoder so the new
+// stream starts with a keyframe — without it the decoder renders delta
+// frames against the previous display's references and stays corrupted.
+fn request_display(session: &Session<BridgeHandler>, display: i32) {
+    let mut misc = Misc::new();
+    misc.set_switch_display(SwitchDisplay {
+        display,
+        ..Default::default()
+    });
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    session.send(Data::Message(msg));
+
+    let mut misc = Misc::new();
+    misc.set_capture_displays(CaptureDisplays {
+        set: vec![display],
+        ..Default::default()
+    });
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    session.send(Data::Message(msg));
+
+    let mut misc = Misc::new();
+    misc.set_refresh_video_display(display);
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    session.send(Data::Message(msg));
 }
 
 pub fn run() {
@@ -339,6 +415,8 @@ pub fn run() {
     let peer_info = handler.peer_info.clone();
     let error = handler.error.clone();
     let pending_2fa = handler.pending_2fa.clone();
+    let displays = handler.displays.clone();
+    let current_display = handler.current_display.clone();
 
     let session: Session<BridgeHandler> = Session {
         password: cfg.connection.password.clone(),
@@ -372,8 +450,28 @@ pub fn run() {
         error,
         pending_2fa,
         mouse: Arc::new(Mutex::new((0, 0))),
+        displays,
+        current_display,
         session,
     });
+
+    if let Some(idx) = cfg.display {
+        // Auto-switch once video flows: switching before the video services
+        // start gets the request dropped and leaves the stream dead.
+        let st = state.clone();
+        std::thread::spawn(move || {
+            for _ in 0..240 {
+                if st.seq.load(Ordering::Relaxed) > 0 {
+                    std::thread::sleep(Duration::from_millis(500));
+                    request_display(&st.session, idx);
+                    eprintln!("[bridge] switched to display {idx}");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            eprintln!("[bridge] display auto-switch to {idx} timed out (no video)");
+        });
+    }
 
     let listener = TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|e| {
         eprintln!("[bridge] bind 127.0.0.1:{port} failed: {e}");
@@ -533,18 +631,48 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
             "status" => {
                 let pi = state.peer_info.read().unwrap().clone();
                 let err = state.error.lock().unwrap().clone();
-                let (w, h) = pi
-                    .as_ref()
-                    .and_then(|p| p.displays.get(p.current_display as usize))
+                let displays = state.displays.read().unwrap().clone();
+                let cur = *state.current_display.lock().unwrap();
+                // Geometry of the streamed display: live callbacks first,
+                // peer_info fallback second.
+                let (w, h) = displays
+                    .get(cur.max(0) as usize)
+                    .filter(|d| d.width > 0)
                     .map(|d| (d.width, d.height))
+                    .or_else(|| {
+                        pi.as_ref()
+                            .and_then(|p| p.displays.get(cur.max(0) as usize))
+                            .map(|d| (d.width, d.height))
+                    })
                     .unwrap_or((0, 0));
                 let connected = pi.is_some() && err.is_none();
                 let seq = state.seq.load(Ordering::Relaxed);
                 let pending_2fa = *state.pending_2fa.lock().unwrap();
+                let list = displays
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        format!(
+                            "{{\"index\":{i},\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}",
+                            d.x, d.y, d.width, d.height
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let msg = format!(
-                    "{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h},\"seq\":{seq},\"pending_2fa\":{pending_2fa}}}"
+                    "{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h},\"seq\":{seq},\"pending_2fa\":{pending_2fa},\"display\":{cur},\"displays\":[{list}]}}"
                 );
                 write_msg(&mut writer, 0x01, msg.as_bytes())?;
+            }
+            "display" => {
+                let idx = req.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+                if idx < 0 {
+                    write_msg(&mut writer, 0x01, b"{\"ok\":false,\"err\":\"missing index\"}")?;
+                } else {
+                    request_display(&state.session, idx as i32);
+                    eprintln!("[bridge] switched to display {idx} (ipc)");
+                    write_msg(&mut writer, 0x01, b"{\"ok\":true}")?;
+                }
             }
             "send_2fa" => {
                 let code = req.get("code").and_then(|v| v.as_str()).unwrap_or("");

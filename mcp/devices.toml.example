@@ -4,9 +4,13 @@
 # RUSTDESK_DEVICES_CONFIG=mcp/devices.toml in .mcp.json.
 #
 # Child TOMLs use the single-device format ([connection]/[video]/[ipc], see
-# bridge.toml.example). Each device's [ipc] port MUST equal its port here.
-# Every [[device]]'s config file must exist — delete the whole [[device]]
-# block for devices you have not configured yet, or startup fails.
+# bridge.toml.example), plus an optional top-level `display = N` (0-based)
+# that pins the bridge to one display of a multi-display host — the bridge
+# switches to it automatically once video flows. `display` MUST appear
+# before any [section] header in the child TOML. Each device's [ipc] port
+# MUST equal its port here. Every [[device]]'s config file must exist —
+# delete the whole [[device]] block for devices you have not configured
+# yet, or startup fails.
 
 # Optional: bridge binary. Default: the RUSTDESK_BRIDGE_BIN env var.
 # bridge_bin = "target/release/bridge"
@@ -20,9 +24,19 @@ autostart = false                # false = connect on first tool call (on-demand
 idle_timeout = 600               # lease seconds, renewed by EVERY tool call; 0 = never sleep
 max_duration = 0                 # hard cap since spawn even if active; 0 = off; keep_alive() extends
 
+# Multi-display hosts: one device per display, each with its own child TOML
+# (display = 0 / 1 / ...) and unique port. One display at a time is streamed
+# per connection; mouse coordinates are display-local.
+#
+# [[device]]
+# name = "pc1d1"
+# port = 21568
+# config = "mcp/devices/pc1d1.toml"   # same credentials as pc1.toml + display = 1
+# idle_timeout = 600
+
 [[device]]
 name = "pc2"
-port = 21568
+port = 21570
 config = "mcp/devices/pc2.toml"
 idle_timeout = 600
 

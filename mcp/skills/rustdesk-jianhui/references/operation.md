@@ -71,6 +71,10 @@ $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/replay.py --images $REPO/images
 
 回放核对六张单窗口图的状态、准备槽与模板对其他界面的误匹配,并输出本地识别耗时。这不包含 MCP 传输时间,不等同于实机端到端性能。首次试跑仍先短暂 observe,校准通过后再 execute。
 
+## 多显示器
+
+宿主(如 pc1)有多台显示器时,一台显示器一条 bridge 连接:`devices.toml` 里每个 `pc1dN` 一个 `[[device]]` 块(独立端口),子 TOML `mcp/devices/pc1dN.toml` 用 pc1 的凭据加一行顶层 `display = N`(0 基,必须位于任何 `[section]` 之前);bridge 在视频流通后自动切屏。窗口条目用 `"device": "pc1dN"` 指定所属显示器,不同显示器分辨率不同时用窗口级 `native_resolution` 覆盖。每连接只流一块屏,鼠标坐标是屏内坐标;runner 的窗口串行循环保证不抢全局光标。`{"cmd":"display","index":N}` 可对运行中的 bridge 手动切屏。
+
 ## 离线测试套件
 
 ```sh

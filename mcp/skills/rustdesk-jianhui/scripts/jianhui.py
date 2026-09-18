@@ -235,6 +235,14 @@ def validate(cfg, games):
         x, y, w, h = win['rect']
         if not re.fullmatch(r'[a-z0-9_-]+', win['name']) or not win['room_keyword']:
             raise ValueError('Invalid name or missing room identity')
+        dev = win.get('device')
+        if dev is not None and not re.fullmatch(r'[a-z0-9_-]+', dev):
+            raise ValueError('Invalid window device name')
+        if 'native_resolution' in win:
+            r = win['native_resolution']
+            if (not isinstance(r, list) or len(r) != 2
+                    or any(type(v) is not int or v < 1 for v in r)):
+                raise ValueError('Invalid window native_resolution')
         if min(x, y) < 0 or not 300 <= w <= 2560 or h < 300 or x+w > nw or y+h > nh:
             raise ValueError('Invalid native content rectangle')
     a, b = [win['rect'] for win in windows]
@@ -318,26 +326,32 @@ async def run(args):
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer) as session:
                 await asyncio.wait_for(session.initialize(), 30)
-                async def call(name, **kwargs):
+                async def call(name, device, **kwargs):
                     if stopping():
                         raise InterruptedError('stop requested')
-                    result = await asyncio.wait_for(session.call_tool(name, {'device': 'pc1', **kwargs}), 12)
+                    result = await asyncio.wait_for(session.call_tool(name, {'device': device, **kwargs}), 12)
                     if result.is_error:
                         raise RuntimeError(str(result.content))
                     return result.content
+
+                def win_device(win):
+                    return win.get('device', cfg['device'])
+
                 async def capture(win):
                     x, y, w, h = win['rect']
-                    content = await call('screenshot', format='png', max_width=2560,
+                    res = win.get('native_resolution', cfg['native_resolution'])
+                    content = await call('screenshot', win_device(win), format='png', max_width=2560,
                                          crop_x=x, crop_y=y, crop_w=w, crop_h=h)
                     note = ' '.join(c.text for c in content if c.type == 'text')
                     dims = re.search(r'native_resolution=(\d+)x(\d+)', note)
-                    if not dims or list(map(int, dims.groups())) != cfg['native_resolution']:
+                    if not dims or list(map(int, dims.groups())) != res:
                         raise RuntimeError('Resolution changed; recalibration required')
                     blob = next(c.data for c in content if c.type == 'image')
                     img = Image.open(io.BytesIO(base64.b64decode(blob))).convert('RGB')
                     if img.size != (w, h):
                         raise RuntimeError('Crop resized or clipped')
                     return img
+                devices = sorted({cfg['device'], *(win_device(w) for w in cfg['windows'])})
                 lease = 0
                 loop_index = 0
                 anchors = [BattleAnchors() for _ in cfg['windows']]
@@ -346,7 +360,8 @@ async def run(args):
                     loop_index += 1
                     started = time.monotonic()
                     if started >= lease:
-                        await call('keep_alive', minutes=5)
+                        for dev in devices:
+                            await call('keep_alive', dev, minutes=5)
                         lease = started+60
                     for i, win in enumerate(cfg['windows']):
                         s = states[i]
@@ -374,8 +389,8 @@ async def run(args):
                             px, py = cfg.get('panel_close', [.907, .122])
                             tx, ty = round(x+w*px), round(y+h*py)
                             event(window=win['name'], intent='close-activate')
-                            await call('click', x=tx, y=ty, humanize=False)
-                            await call('click', x=tx, y=ty, humanize=False, button='right')
+                            await call('click', win_device(win), x=tx, y=ty, humanize=False)
+                            await call('click', win_device(win), x=tx, y=ty, humanize=False, button='right')
                             event(window=win['name'], sent='close-activate')
                         if s.get('active') and obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
                             anchors[i].learn(img)
@@ -424,7 +439,7 @@ async def run(args):
                                 s.update(pending=action, sent=time.monotonic())
                                 persist()
                                 event(window=win['name'], intent=action, before=before)
-                                await call('click', x=round(x+w*px), y=round(y+h*py), humanize=False, button=button)
+                                await call('click', win_device(win), x=round(x+w*px), y=round(y+h*py), humanize=False, button=button)
                                 event(window=win['name'], sent=action)
                         persist()
                     summary['loop_seconds'] = round(time.monotonic()-started, 3)
