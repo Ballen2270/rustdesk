@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 import re
 import signal
+import subprocess
+import sys
 import time
 
 from PIL import Image
@@ -133,7 +135,7 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False):
     return obs, items
 
 
-def advance(s, obs, now, target):
+def advance(s, obs, now, target, room_timeout=90):
     """Two consecutive observations before transitions; never retry an input."""
     state = obs['state']
     if s.get('paused') or s['count'] >= target:
@@ -146,7 +148,7 @@ def advance(s, obs, now, target):
     s['streak'] += 1
     if state == 'unknown' and now-s['since'] > 20:
         s['warning'] = 'unknown screen; inputs withheld while local observation continues'
-    timeout = {'room': 90, 'matching': 600, 'result': 90}.get(state)
+    timeout = {'room': room_timeout, 'matching': 600, 'result': 90}.get(state)
     if timeout is not None and now-s['since'] > timeout:
         s['paused'] = 'state timeout: '+state
     if s.get('paused'):
@@ -182,6 +184,26 @@ def save(path, data):
     tmp.replace(path)
 
 
+def shot_name(win, tag):
+    return f"{time.time_ns()}-{win}-{tag}.png"
+
+
+def checkpoint(args):
+    """Package a verified, stopped run into the documented --resume-state format."""
+    state = json.loads(args.state.read_text())
+    if state.get('status') == 'running':
+        raise ValueError('Run still active; stop it before checkpointing')
+    windows = []
+    for s in state.get('windows', []):
+        if s.get('pending') or s.get('paused'):
+            raise ValueError('Reconcile pending or paused windows before checkpointing')
+        windows.append(dict(count=s.get('count', 0), active=bool(s.get('active')),
+                            initialized=bool(s.get('initialized'))))
+    data = dict(config=state['config'], games=state['games'], windows=windows)
+    save(args.out, data)
+    return data
+
+
 def validate(cfg, games):
     if cfg.get('device') != 'pc1' or not cfg.get('calibrated'):
         raise ValueError('Requires calibrated pc1 configuration')
@@ -201,6 +223,9 @@ def validate(cfg, games):
     counts = cfg.get('initial_counts', [0, 0])
     if len(counts) != 2 or any(type(n) is not int or not 0 <= n <= games for n in counts):
         raise ValueError('Invalid initial counts')
+    room_timeout = cfg.get('room_timeout', 90)
+    if type(room_timeout) is not int or room_timeout < 10:
+        raise ValueError('Invalid room timeout (integer seconds, minimum 10)')
     slots = cfg.get('ready_slots', SLOTS)
     if len(slots) != 4 or any(len(r) != 4 or min(r) < 0 or r[2] <= 0 or r[3] <= 0 or r[0]+r[2] > 1 or r[1]+r[3] > 1 for r in slots):
         raise ValueError('Invalid ready slots')
@@ -215,12 +240,29 @@ async def run(args):
     cfg = json.loads(args.config.read_text())
     validate(cfg, args.games)
     repo = args.repo.resolve()
-    spec = json.loads((repo/'.mcp.json').read_text())['mcpServers']['rustdesk']
-    if not spec.get('env', {}).get('RUSTDESK_DEVICES_CONFIG'):
-        raise ValueError('Fleet MCP configuration required')
+    if args.mcp_spec:
+        spec = json.loads(args.mcp_spec.read_text())['mcpServers']['rustdesk']
+    else:
+        spec = json.loads((repo/'.mcp.json').read_text())['mcpServers']['rustdesk']
+        if not spec.get('env', {}).get('RUSTDESK_DEVICES_CONFIG'):
+            raise ValueError('Fleet MCP configuration required')
     lock = open('/private/tmp/rustdesk-jianhui-pc1.lock', 'a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     args.output.mkdir(parents=True, exist_ok=False)
+    if args.keep_frames == 'all':
+        (args.output/'frames').mkdir()
+        print('keep-frames=all: saving every loop frame as JPEG (~1GB/hour for two windows)', flush=True)
+    viewer_proc = None
+    if args.viewer:
+        viewer_proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).parent/'viewer.py'),
+             '--run-dir', str(args.output), '--port', str(args.viewer_port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await asyncio.sleep(.5)
+        if viewer_proc.poll() is None:
+            print(f'viewer: http://127.0.0.1:{args.viewer_port}', flush=True)
+        else:
+            print(f'viewer exited immediately (rc={viewer_proc.returncode}); port busy?', flush=True)
     stopped = False
     def request_stop(*_):
         nonlocal stopped
@@ -238,10 +280,15 @@ async def run(args):
         states = checkpoint['windows']
         if len(states) != 2 or any(s.get('pending') or s.get('paused') for s in states):
             raise ValueError('Reconcile paused or pending actions before explicit resume')
-    summary = dict(mode='execute' if args.execute else 'observe', status='starting', windows=states)
+    summary = dict(mode='execute' if args.execute else 'observe', status='starting',
+                   games=args.games, config=cfg, windows=states)
+    def log_jsonl(name, entry):
+        with (args.output/name).open('a') as f:
+            f.write(json.dumps(entry, ensure_ascii=False)+'\n')
     def event(**entry):
-        with (args.output/'events.jsonl').open('a') as f:
-            f.write(json.dumps(dict(time=time.time(), **entry), ensure_ascii=False)+'\n')
+        log_jsonl('events.jsonl', dict(time=time.time(), **entry))
+    def timeline(entry):
+        log_jsonl('timeline.jsonl', entry)
     def persist():
         save(args.output/'state.json', summary)
     params = StdioServerParameters(command=spec['command'], args=spec['args'], cwd=str(repo),
@@ -272,9 +319,11 @@ async def run(args):
                         raise RuntimeError('Crop resized or clipped')
                     return img
                 lease = 0
+                loop_index = 0
                 anchors = [BattleAnchors() for _ in cfg['windows']]
                 summary['status'] = 'running'
                 while not stopping():
+                    loop_index += 1
                     started = time.monotonic()
                     if started >= lease:
                         await call('keep_alive', minutes=5)
@@ -291,7 +340,9 @@ async def run(args):
                                 s['paused'] = 'start requires prepared room; reconcile ongoing match'
                             s['initialized'] = True
                         prior = s.get('seen')
-                        action = advance(s, obs, time.monotonic(), args.games)
+                        had_pending = s.get('pending')
+                        action = advance(s, obs, time.monotonic(), args.games, cfg.get('room_timeout', 90))
+                        confirmed = had_pending if had_pending and not s.get('pending') else None
                         if s.get('active') and obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
                             anchors[i].learn(img)
                         if obs['state'] in ('room', 'ready', 'result', 'panel'):
@@ -299,27 +350,47 @@ async def run(args):
                         s['observation'] = obs
                         save(args.output/f"recognition-{win['name']}.json", dict(observation=obs, items=items, warning=s.get('warning')))
                         if prior != obs['state']:
-                            event(window=win['name'], observation=obs, count=s['count'])
-                            img.save(args.output/f"{time.time_ns()}-{win['name']}-{obs['state']}.png")
+                            evidence = shot_name(win['name'], obs['state'])
+                            event(window=win['name'], observation=obs, count=s['count'], evidence=evidence)
+                            img.save(args.output/evidence)
+                        if confirmed:
+                            after = shot_name(win['name'], confirmed+'-after')
+                            img.save(args.output/after)
+                            event(window=win['name'], confirmed=confirmed, after=after, count=s['count'])
+                        entry = dict(time=time.time(), loop=loop_index, window=win['name'],
+                                     state=obs['state'], source=obs['source'], ready=obs['ready'],
+                                     count=s['count'], active=s.get('active', False),
+                                     pending=s.get('pending'), action=action, confirmed=confirmed,
+                                     warning=s.get('warning'), paused=s.get('paused'),
+                                     recognition_seconds=obs['recognition_seconds'],
+                                     anchors=len(anchors[i].references))
+                        if args.keep_frames == 'all':
+                            frame = f"frames/{loop_index:06d}-{win['name']}.jpg"
+                            img.save(args.output/frame, quality=75)
+                            entry['frame'] = frame
+                        timeline(entry)
                         if action and args.execute:
                             # Recheck the target immediately before any input, after other window work.
                             check_img = await capture(win)
                             check, _ = await asyncio.to_thread(recognize, check_img, win['room_keyword'], win.get('ready_slots', cfg.get('ready_slots', SLOTS)))
                             if check['state'] != obs['state']:
-                                continue
-                            if time.monotonic()-started > 10:
-                                raise RuntimeError('Observation loop too slow for bounded input')
-                            x, y, w, h = win['rect']
-                            if action == 'match':
-                                b = check['button']
-                                px, py = b['x']+b['w']/2, b['y']+b['h']/2
+                                event(window=win['name'], action_aborted=action, reason='state changed on recheck')
                             else:
-                                px, py = cfg.get('panel_close', [.907, .122])
-                            s.update(pending=action, sent=time.monotonic())
-                            persist()
-                            event(window=win['name'], intent=action)
-                            await call('click', x=round(x+w*px), y=round(y+h*py), humanize=False)
-                            event(window=win['name'], sent=action)
+                                if time.monotonic()-started > 10:
+                                    raise RuntimeError('Observation loop too slow for bounded input')
+                                before = shot_name(win['name'], action+'-before')
+                                check_img.save(args.output/before)
+                                x, y, w, h = win['rect']
+                                if action == 'match':
+                                    b = check['button']
+                                    px, py = b['x']+b['w']/2, b['y']+b['h']/2
+                                else:
+                                    px, py = cfg.get('panel_close', [.907, .122])
+                                s.update(pending=action, sent=time.monotonic())
+                                persist()
+                                event(window=win['name'], intent=action, before=before)
+                                await call('click', x=round(x+w*px), y=round(y+h*py), humanize=False)
+                                event(window=win['name'], sent=action)
                         persist()
                     summary['loop_seconds'] = round(time.monotonic()-started, 3)
                     if summary['loop_seconds'] > 10:
@@ -336,6 +407,8 @@ async def run(args):
         event(error=str(exc))
     finally:
         persist()
+        if viewer_proc and viewer_proc.poll() is None:
+            viewer_proc.terminate()
         lock.close()
     print(json.dumps(summary, ensure_ascii=False))
     return 1 if summary['status'] == 'paused' else 0
@@ -356,6 +429,14 @@ def main():
     live.add_argument('--resume-state', type=Path, help='Explicitly verified checkpoint; never automatic recovery')
     live.add_argument('--games', type=int, default=10)
     live.add_argument('--minutes', type=float, default=0, help='Optional task limit in minutes; 0 means no time limit')
+    live.add_argument('--mcp-spec', type=Path, help='Alternate mcpServers spec JSON (offline mock); skips the fleet config check')
+    live.add_argument('--keep-frames', choices=('changes', 'all'), default='changes',
+                      help="all additionally saves every loop frame as frames/*.jpg (~1GB/hour)")
+    live.add_argument('--viewer', action='store_true', help='Spawn the read-only web viewer on the run directory')
+    live.add_argument('--viewer-port', type=int, default=8788)
+    ckpt = sub.add_parser('checkpoint', help='Package a stopped, reconciled run into an explicit --resume-state file')
+    ckpt.add_argument('--state', type=Path, required=True, help='state.json of the stopped run')
+    ckpt.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'inspect':
         img = Image.open(args.image)
@@ -366,6 +447,9 @@ def main():
         observation, items = recognize(img, args.keyword)
         print(json.dumps(dict(image=str(args.image), seconds=round(time.monotonic()-started, 3),
                               observation=observation, items=items), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == 'checkpoint':
+        print(json.dumps(checkpoint(args), ensure_ascii=False, indent=2))
         return 0
     if not 1 <= args.games <= 10 or not math.isfinite(args.minutes) or args.minutes < 0:
         parser.error('games must be 1..10; minutes must be finite and >= 0 (0 disables the task limit)')

@@ -1,8 +1,12 @@
 """Offline behavioral regression tests; never connect to a device."""
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from PIL import Image
-from jianhui import advance, classify, recognize, SLOTS
+from jianhui import advance, checkpoint, classify, recognize, shot_name, SLOTS
 from local_features import BattleAnchors
 
 
@@ -151,6 +155,45 @@ class StateTests(unittest.TestCase):
         self.assertEqual(classify([cancel, item('12', .49,.03)])['state'], 'battle')
         self.assertEqual(classify([cancel])['state'], 'unknown')
         self.assertEqual(classify([cancel, item('12', .1,.03)])['state'], 'unknown')
+
+    def test_room_timeout_is_configurable(self):
+        strict = {'count': 0}
+        advance(strict, {'state': 'room'}, 1, 10)
+        advance(strict, {'state': 'room'}, 200, 10)
+        self.assertIn('paused', strict)
+        patient = {'count': 0}
+        advance(patient, {'state': 'room'}, 1, 10, room_timeout=600)
+        self.assertIsNone(advance(patient, {'state': 'room'}, 200, 10, room_timeout=600))
+        self.assertNotIn('paused', patient)
+
+    def test_shot_name_is_sortable_and_identifies_window_and_tag(self):
+        self.assertRegex(shot_name('left', 'match-before'), r'^\d+-left-match-before\.png$')
+        self.assertRegex(shot_name('right', 'ready'), r'^\d+-right-ready\.png$')
+
+    def test_checkpoint_roundtrip_and_refusals(self):
+        cfg = json.loads((Path(__file__).parent.parent/'assets'/'pc1.example.json').read_text())
+        good = dict(status='stopped', config=cfg, games=2,
+                    windows=[dict(count=1, active=False, initialized=True, pending=None),
+                             dict(count=2, active=False, initialized=True)])
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            out = d/'checkpoint.json'
+            (d/'state.json').write_text(json.dumps(good))
+            data = checkpoint(SimpleNamespace(state=d/'state.json', out=out))
+            self.assertEqual(data['windows'][0]['count'], 1)
+            self.assertEqual(data['config'], cfg)
+            self.assertEqual(json.loads(out.read_text())['games'], 2)
+            for mutation in ('running', 'pending', 'paused'):
+                bad = json.loads(json.dumps(good))
+                if mutation == 'running':
+                    bad['status'] = 'running'
+                elif mutation == 'pending':
+                    bad['windows'][0]['pending'] = 'match'
+                else:
+                    bad['windows'][0]['paused'] = 'state timeout: room'
+                (d/'state.json').write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):
+                    checkpoint(SimpleNamespace(state=d/'state.json', out=out))
 
 
 if __name__ == '__main__':
