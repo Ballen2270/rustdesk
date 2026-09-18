@@ -61,8 +61,23 @@ class StateTests(unittest.TestCase):
     def test_pending_match_never_blindly_retried(self):
         s = {'count': 0, 'pending': 'match', 'sent': 0}
         self.assertIsNone(self.feed(s, 'ready', 2))
-        self.assertIsNone(self.feed(s, 'ready', 15))
+        self.assertIsNone(self.feed(s, 'ready', 25))
         self.assertIn('paused', s)
+
+    def test_single_flashed_result_still_counts(self):
+        s = {'count': 0}
+        self.feed(s, 'battle')
+        advance(s, {'state': 'result'}, 5, 10)  # one poll, then the screen auto-closes
+        self.assertEqual(s['count'], 1)
+        self.assertIsNone(advance(s, {'state': 'unknown'}, 6, 10))
+        self.assertEqual(self.feed(s, 'ready', 15), 'match')
+
+    def test_flashed_result_without_battle_does_not_count(self):
+        s = {'count': 0}
+        advance(s, {'state': 'result'}, 1, 10)
+        advance(s, {'state': 'result'}, 2, 10)
+        self.assertEqual(s['count'], 0)
+        self.assertNotIn('active', s)
 
     def test_two_windows_are_independent(self):
         a, b = {'count': 0}, {'count': 0}

@@ -151,9 +151,14 @@ def advance(s, obs, now, target, room_timeout=90):
     if state != 'unknown':
         s.pop('warning', None)
     if s.get('seen') != state:
-        s.update(seen=state, streak=1, since=now)
-        return None
-    s['streak'] += 1
+        if state == 'result' and s.get('active'):
+            # Result screens can auto-close within a single poll; count on first sight.
+            s.update(seen=state, streak=2, since=now)
+        else:
+            s.update(seen=state, streak=1, since=now)
+            return None
+    else:
+        s['streak'] += 1
     if state == 'unknown' and now-s['since'] > 20:
         s['warning'] = 'unknown screen; inputs withheld while local observation continues'
     timeout = {'room': room_timeout, 'matching': 600, 'result': 90, 'kickwarn': 45}.get(state)
@@ -169,7 +174,7 @@ def advance(s, obs, now, target, room_timeout=90):
             s.pop('pending', None)
         elif pending == 'rematch' and state in ('matching', 'battle', 'room', 'ready', 'panel'):
             s.pop('pending', None)
-        elif now-s['sent'] > 12:
+        elif now-s['sent'] > 20:
             s['paused'] = 'action not confirmed: '+pending
         if s.get('pending') or s.get('paused'):
             return None
