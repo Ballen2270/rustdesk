@@ -71,11 +71,15 @@ def classify(items, keyword='', slots=SLOTS):
     ready = [any(it['text'] == '准备' and it['score'] >= .35 and within(it, slot)
                  for it in items) for slot in slots]
     button = next((it for it in items if '天梯匹配' in it['text'] and within(it, bottom)), None)
+    kick_button = next((it for it in items if '开始匹配' in it['text'] and within(it, (.50, .52, .30, .18))), None)
+    kickwarn = kick_button is not None and has('我再等等', (.24, .52, .26, .18))
     round_number = any(it['text'].isdigit() and within(it, (.42, 0, .16, .12)) for it in items)
     if result:
         state = 'result'
     elif panel:
         state = 'panel'
+    elif kickwarn:
+        state = 'kickwarn'
     elif room and has('取消匹配', bottom):
         state = 'matching'
     elif room and button:
@@ -86,7 +90,7 @@ def classify(items, keyword='', slots=SLOTS):
         state = 'battle'
     else:
         state = 'unknown'
-    return dict(state=state, ready=ready, button=button)
+    return dict(state=state, ready=ready, button=kick_button if state == 'kickwarn' else button)
 
 
 def region_ocr(img, box, scale=1):
@@ -120,6 +124,10 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False):
                 and green_label(img, it)):
             it.update(raw_text=it['text'], raw_score=it['score'], text='准备', score=max(.5, it['score']), evidence='ocr+green_background')
     obs = classify(items, keyword, slots)
+    if obs['state'] in ('room', 'ready'):
+        # The kick-warning modal sits mid-screen; its band is only scanned there.
+        items.extend(region_ocr(img, (.20, .30, .60, .42), 2))
+        obs = classify(items, keyword, slots)
     if obs['state'] == 'unknown':
         items.extend(region_ocr(img, (.42, 0, .16, .12), 3))
         obs = classify(items, keyword, slots)
@@ -148,7 +156,7 @@ def advance(s, obs, now, target, room_timeout=90):
     s['streak'] += 1
     if state == 'unknown' and now-s['since'] > 20:
         s['warning'] = 'unknown screen; inputs withheld while local observation continues'
-    timeout = {'room': room_timeout, 'matching': 600, 'result': 90}.get(state)
+    timeout = {'room': room_timeout, 'matching': 600, 'result': 90, 'kickwarn': 45}.get(state)
     if timeout is not None and now-s['since'] > timeout:
         s['paused'] = 'state timeout: '+state
     if s.get('paused'):
@@ -159,6 +167,8 @@ def advance(s, obs, now, target, room_timeout=90):
             s.pop('pending', None)
         elif pending == 'close' and state in ('room', 'ready'):
             s.pop('pending', None)
+        elif pending == 'rematch' and state in ('matching', 'battle', 'room', 'ready', 'panel'):
+            s.pop('pending', None)
         elif now-s['sent'] > 12:
             s['paused'] = 'action not confirmed: '+pending
         if s.get('pending') or s.get('paused'):
@@ -168,6 +178,11 @@ def advance(s, obs, now, target, room_timeout=90):
     elif state == 'result' and s.get('active'):
         s['count'] += 1
         s['active'] = False
+    elif state == 'kickwarn':
+        if s.get('active'):
+            s['paused'] = 'kick warning during uncounted battle; reconcile'
+        else:
+            return 'rematch'
     elif state in ('panel', 'room', 'ready'):
         if s.get('active'):
             s['paused'] = 'returned without observed result; reconcile count'
@@ -343,6 +358,20 @@ async def run(args):
                         had_pending = s.get('pending')
                         action = advance(s, obs, time.monotonic(), args.games, cfg.get('room_timeout', 90))
                         confirmed = had_pending if had_pending and not s.get('pending') else None
+                        if confirmed:
+                            s.pop('close_esc', None)
+                        if (args.execute and s.get('pending') == 'close' and obs['state'] == 'panel'
+                                and not s.get('close_esc') and time.monotonic()-s.get('sent', 0) > 4):
+                            # Right-click only lands on an active window; activate, then right-click again.
+                            s['close_esc'] = True
+                            s['sent'] = time.monotonic()
+                            x, y, w, h = win['rect']
+                            px, py = cfg.get('panel_close', [.907, .122])
+                            tx, ty = round(x+w*px), round(y+h*py)
+                            event(window=win['name'], intent='close-activate')
+                            await call('click', x=tx, y=ty, humanize=False)
+                            await call('click', x=tx, y=ty, humanize=False, button='right')
+                            event(window=win['name'], sent='close-activate')
                         if s.get('active') and obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
                             anchors[i].learn(img)
                         if obs['state'] in ('room', 'ready', 'result', 'panel'):
@@ -381,15 +410,16 @@ async def run(args):
                                 before = shot_name(win['name'], action+'-before')
                                 check_img.save(args.output/before)
                                 x, y, w, h = win['rect']
-                                if action == 'match':
+                                if action in ('match', 'rematch'):
                                     b = check['button']
                                     px, py = b['x']+b['w']/2, b['y']+b['h']/2
                                 else:
                                     px, py = cfg.get('panel_close', [.907, .122])
+                                button = 'right' if action == 'close' else 'left'
                                 s.update(pending=action, sent=time.monotonic())
                                 persist()
                                 event(window=win['name'], intent=action, before=before)
-                                await call('click', x=round(x+w*px), y=round(y+h*py), humanize=False)
+                                await call('click', x=round(x+w*px), y=round(y+h*py), humanize=False, button=button)
                                 event(window=win['name'], sent=action)
                         persist()
                     summary['loop_seconds'] = round(time.monotonic()-started, 3)

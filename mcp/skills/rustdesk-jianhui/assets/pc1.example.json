@@ -1,12 +1,64 @@
 {
   "device": "pc1",
   "calibrated": false,
-  "native_resolution": [3452, 1908],
-  "initial_counts": [0, 0],
-  "windows": [
-    {"name": "left", "rect": [0, 0, 0, 0], "room_keyword": "剑霜九洲"},
-    {"name": "right", "rect": [0, 0, 0, 0], "room_keyword": "力拔山兮"}
+  "native_resolution": [
+    3452,
+    1908
   ],
-  "ready_slots": [[0.20, 0.65, 0.16, 0.15], [0.37, 0.68, 0.16, 0.15], [0.56, 0.65, 0.16, 0.15], [0.75, 0.62, 0.17, 0.16]],
-  "panel_close": [0.907, 0.122]
+  "initial_counts": [
+    0,
+    0
+  ],
+  "windows": [
+    {
+      "name": "left",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "room_keyword": "剑霜九洲"
+    },
+    {
+      "name": "right",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "room_keyword": "力拔山兮"
+    }
+  ],
+  "ready_slots": [
+    [
+      0.2,
+      0.65,
+      0.16,
+      0.15
+    ],
+    [
+      0.37,
+      0.68,
+      0.16,
+      0.15
+    ],
+    [
+      0.56,
+      0.65,
+      0.16,
+      0.15
+    ],
+    [
+      0.75,
+      0.62,
+      0.17,
+      0.16
+    ]
+  ],
+  "panel_close": [
+    0.904,
+    0.139
+  ]
 }

@@ -15,7 +15,9 @@ def main():
     args = p.parse_args()
     expected = {'匹配界面单个.png': 'room', '匹配中.png': 'matching',
                 '结算完成界面.png': 'panel', '战斗ing.png': 'battle',
-                '战斗失败.png': 'result', '匹配成功.png': 'unknown'}
+                '战斗失败.png': 'result', '匹配成功.png': 'unknown',
+                '匹配结束后每周任务.png': 'panel',
+                '长时间未开始匹配会被踢出房间需要点击开始匹配.png': 'kickwarn'}
     times, failures = [], []
     anchors = BattleAnchors()
     for name, state in expected.items():

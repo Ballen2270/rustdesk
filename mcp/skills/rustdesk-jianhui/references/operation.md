@@ -8,7 +8,7 @@ $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/jianhui.py inspect --image images/
 
 inspect 可加 `--rect x,y,w,h`,指定**游戏内容**矩形;省略时将整张图作为游戏画面,带标题栏的参考图只用于初步识别验证。
 
-配置字段见 assets/pc1.example.json。四个 ready_slots 是游戏内容归一化矩形;实际准备标记必须落在四个不同区域。panel_close 是任务面板游戏内 × 的归一化位置,不能指向 Windows 关闭按钮。live 截图宽度超过 2560 的窗口不支持,需先校准较小窗口。`room_timeout`(整数秒,≥10,默认 90)是等待队员准备的观察上限,队友较慢时在配置中放宽。
+配置字段见 assets/pc1.example.json。四个 ready_slots 是游戏内容归一化矩形;实际准备标记必须落在四个不同区域,且两队房主站位不同,必须分别实测。panel_close 是任务面板游戏内 × 的归一化位置(pc1 实测 [0.904, 0.139]),用鼠标右键关闭;窗口未激活未关闭时脚本自动先左键激活再右键一次,仍失败则暂停;不能指向 Windows 关闭按钮。「所有人都已经准备……倒计时」踢出警告弹窗出现时自动点击「开始匹配」,45 秒未决暂停。live 截图宽度超过 2560 的窗口不支持,需先校准较小窗口。`room_timeout`(整数秒,≥10,默认 90)是等待队员准备的观察上限,队友较慢时在配置中放宽。
 
 ready_slots 可以放在每个 windows 条目内,优先于顶层默认值。它们必须排除该队房主所在槽位;房主站位和队长站位可能不同。当前 MCP SDK 使用 CallToolResult.is_error 字段。
 

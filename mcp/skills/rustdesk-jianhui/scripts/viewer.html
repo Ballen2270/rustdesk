@@ -10,7 +10,7 @@
   --text:#c9d7e2; --dim:#5d7186; --faint:#3b4d61;
   --amber:#ffb454; --red:#ff5d5d; --green:#35d07f; --violet:#a78bfa; --blue:#5aa9ff; --gold:#ffcf5c;
   --room:#5aa9ff; --ready:#35d07f; --matching:#a78bfa; --battle:#ff5d5d; --result:#ffcf5c;
-  --panelstate:#ff9151; --unknown:#55677a;
+  --kickwarn:#ffb454; --panelstate:#ff9151; --unknown:#55677a;
   --disp:"Avenir Next Condensed","Futura","Helvetica Neue","PingFang SC",sans-serif;
   --body:"PingFang SC","Helvetica Neue","Noto Sans SC","Microsoft YaHei",sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;
@@ -119,6 +119,7 @@ select{color:var(--text);font-family:var(--body)}
 .st-matching{color:var(--matching);border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.08)}
 .st-battle{color:var(--battle);border-color:rgba(255,93,93,.45);background:rgba(255,93,93,.09);animation:pulse 1.4s infinite}
 .st-result{color:var(--result);border-color:rgba(255,207,92,.4);background:rgba(255,207,92,.08)}
+.st-kickwarn{color:var(--kickwarn);border-color:rgba(255,180,84,.5);background:rgba(255,180,84,.1);animation:pulse 1.2s infinite}
 .st-panel{color:var(--panelstate);border-color:rgba(255,145,81,.4);background:rgba(255,145,81,.08)}
 .st-unknown{color:var(--unknown);border-color:rgba(85,103,122,.5);background:rgba(85,103,122,.1)}
 .card .count{margin-left:auto;font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
@@ -159,6 +160,7 @@ select{color:var(--text);font-family:var(--body)}
 .cell.minor{opacity:.82}
 .c-room{background:var(--room)} .c-ready{background:var(--ready)} .c-matching{background:var(--matching)}
 .c-battle{background:var(--battle)} .c-result{background:var(--result)} .c-panel{background:var(--panelstate)}
+.c-kickwarn{background:var(--kickwarn)}
 .c-unknown{background:var(--unknown)}
 .lane-time{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);width:52px;text-align:right}
 

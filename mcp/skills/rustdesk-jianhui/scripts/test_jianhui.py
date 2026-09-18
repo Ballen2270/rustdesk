@@ -170,6 +170,32 @@ class StateTests(unittest.TestCase):
         self.assertRegex(shot_name('left', 'match-before'), r'^\d+-left-match-before\.png$')
         self.assertRegex(shot_name('right', 'ready'), r'^\d+-right-ready\.png$')
 
+    def test_kick_warning_dialog_detected_over_ready_room(self):
+        def item(text, x, y):
+            return dict(text=text, score=1, x=x, y=y, w=.02, h=.02)
+        base = [item('某人的房间', .4, .03), item('房主', .1, .7), item('天梯匹配', .85, .94)]
+        marks = [item('准备', x+.04, y+.04) for x, y, _, _ in SLOTS]
+        dialog = [item('倒计时：4秒', .45, .51), item('我再等等', .33, .59), item('开始匹配', .58, .59)]
+        obs = classify(base+marks+dialog)
+        self.assertEqual(obs['state'], 'kickwarn')
+        self.assertIn('开始匹配', obs['button']['text'])
+        self.assertEqual(classify(base+marks+[dialog[1]])['state'], 'ready')
+
+    def test_kick_warning_clicks_start_match_then_confirms(self):
+        s = {'count': 0}
+        self.assertEqual(self.feed(s, 'kickwarn'), 'rematch')
+        s.update(pending='rematch', sent=10)
+        self.assertIsNone(self.feed(s, 'matching', 12))
+        self.assertNotIn('pending', s)
+        self.assertNotIn('paused', s)
+
+    def test_kick_warning_during_active_battle_pauses(self):
+        s = {'count': 0}
+        self.feed(s, 'battle')
+        self.feed(s, 'kickwarn', 5)
+        self.assertIn('paused', s)
+        self.assertEqual(s['count'], 0)
+
     def test_checkpoint_roundtrip_and_refusals(self):
         cfg = json.loads((Path(__file__).parent.parent/'assets'/'pc1.example.json').read_text())
         good = dict(status='stopped', config=cfg, games=2,
