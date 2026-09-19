@@ -45,7 +45,7 @@ $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/jianhui.py checkpoint --state /pri
 $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/viewer.py --run-dir /private/tmp/jianhui-run   # http://127.0.0.1:8788
 ```
 
-默认只绑 127.0.0.1;`--host 0.0.0.0` 显式放开局域网(手机观察用),`--port` 可改。功能区:顶栏运行状态、双窗卡片(实时画面、状态徽章、计数进度、准备槽、**本地模型状态**——OCR 来源/耗时/P50/P95、战斗锚点模板数)、状态泳道、操作时序表(窗口过滤、只看动作/异常)、事件日志、截图证据画廊(操作前后对照、点击放大)。唯一写操作是创建 STOP 文件,与人工停止等价;观察台不触碰 bridge 与设备。Claude Code 通过项目级 skill `.claude/skills/rustdesk-jianhui`(符号链接到本目录)发现本 skill。
+默认只绑 127.0.0.1;`--host 0.0.0.0` 显式放开局域网(手机观察用),`--port` 可改。功能区:顶栏运行状态、双窗卡片(实时画面、状态徽章、计数进度、准备槽、**本地模型状态**——OCR 来源/耗时/P50/P95、战斗锚点模板数)、状态泳道、操作时序表(窗口过滤、只看动作/异常)、事件日志(连续重复条目自动折叠为 ×N,「只看关键」过滤掉状态噪声,「清空视图」只清屏显、磁盘 events.jsonl 永不改动)、截图证据画廊(操作前后对照、点击放大)。顶栏 ⚙ 设置面板:刷新频率、泳道/表格/日志容量存本浏览器;自动清理策略写入运行目录 GC.json,由 viewer 的 janitor 守护线程每分钟执行——**没有 GC.json 就从不自动删**(老运行目录打开即安全);白名单永远保留 latest-*.png 与操作前后帧,其余图片按年龄回收。唯一写操作是创建 STOP 文件与 GC.json/删除过期图片,与人工停止/人工清理等价;观察台不触碰 bridge 与设备输入。Claude Code 通过项目级 skill `.claude/skills/rustdesk-jianhui`(符号链接到本目录)发现本 skill。
 
 ## 离线端到端(不连接 pc1)
 

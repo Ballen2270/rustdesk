@@ -113,6 +113,60 @@ class ViewerTests(unittest.TestCase):
         # class's tests in alphabetical order)
         Image.new('RGB', (4, 3), 'green').save(self.dir/'frames'/'000001-left.jpg')
 
+    def test_gc_respects_whitelist_and_age(self):
+        import os
+        v = Viewer(self.dir)
+        now = time.time()
+        def aged(name, hours, data=b'x'):
+            p = self.dir/name
+            p.write_bytes(data)
+            t = now-hours*3600
+            os.utime(p, (t, t))
+            return p
+        old_evidence = aged('111-left-room.png', 5)          # state evidence: aged out
+        old_before = aged('112-left-match-before.png', 5)    # whitelist: kept
+        old_after = aged('113-left-match-after.png', 5)      # whitelist: kept
+        # whitelist: kept (real PNG so the /img fixture stays valid)
+        old_latest = self.dir/'latest-left.png'
+        Image.new('RGB', (4, 3), 'yellow').save(old_latest)
+        t = now-5*3600
+        os = __import__('os')
+        os.utime(old_latest, (t, t))
+        fresh_evidence = aged('114-right-battle.png', .2)    # fresh: kept
+        old_frame = self.dir/'frames'/'000009-old.jpg'
+        old_frame.write_bytes(b'\xff\xd8')
+        t = now-5*3600
+        os.utime(old_frame, (t, t))
+        fresh_frame = self.dir/'frames'/'000010-fresh.jpg'
+        Image.new('RGB', (4, 3), 'white').save(fresh_frame)
+
+        r = v.gc(dict(enabled=True, frames_max_age_h=1, evidence_max_age_h=2))
+        self.assertEqual(r['deleted_evidence'], 1)
+        self.assertEqual(r['deleted_frames'], 1)
+        self.assertFalse(old_evidence.exists())
+        self.assertTrue(old_before.exists() and old_after.exists() and old_latest.exists())
+        self.assertTrue(fresh_evidence.exists())
+        self.assertFalse(old_frame.exists())
+        self.assertTrue(fresh_frame.exists())
+        # disabled policy deletes nothing
+        before = sorted(p.name for p in self.dir.glob('*.png'))
+        v.gc(dict(enabled=False, frames_max_age_h=0.01, evidence_max_age_h=0.01))
+        self.assertEqual(sorted(p.name for p in self.dir.glob('*.png')), before)
+
+    def test_gc_policy_roundtrip_and_validation(self):
+        v = Viewer(self.dir)
+        self.assertIsNone(v.policy())  # no GC.json: janitor inert
+        saved = v.set_policy(dict(enabled=True, frames_max_age_h=6, evidence_max_age_h=2))
+        self.assertEqual(saved['enabled'], True)
+        self.assertEqual(json.loads((self.dir/'GC.json').read_text())['evidence_max_age_h'], 2)
+        self.assertEqual(v.policy()['frames_max_age_h'], 6)
+        for bad in (dict(), dict(enabled='yes'), dict(enabled=True, frames_max_age_h=0),
+                    dict(enabled=True, evidence_max_age_h=-1)):
+            with self.assertRaises(ValueError):
+                v.set_policy(bad)
+        with urllib.request.urlopen(self.base+'/api/gc') as r:
+            self.assertEqual(json.loads(r.read())['policy']['enabled'], True)
+
     def test_index_serves_viewer_html(self):
         body = self.get('/')
         self.assertIn(b'\xe5\x89\x91\xe4\xbc\x9a\xe8\xa7\x82\xe5\xaf\x9f\xe5\x8f\xb0', body)  # 剑会观察台

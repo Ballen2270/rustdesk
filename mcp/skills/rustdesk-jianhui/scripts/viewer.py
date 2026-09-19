@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +45,66 @@ def read_jsonl(path, after=0):
 class Viewer:
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
+
+    # ---- garbage collection ------------------------------------------------
+    # Policy lives in <run>/GC.json, written by the UI. No file (or
+    # enabled=false) means: never delete anything — opening an old run is
+    # safe by default. Protected forever: latest-*.png and the action
+    # before/after pairs; everything else graphical ages out.
+
+    def policy(self):
+        p = self.run_dir/'GC.json'
+        if p.exists():
+            try:
+                return json.loads(p.read_text())
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    def set_policy(self, policy):
+        if not isinstance(policy, dict):
+            raise ValueError('policy must be an object')
+        enabled = policy.get('enabled')
+        if not isinstance(enabled, bool):
+            raise ValueError('enabled must be a boolean')
+        ages = {}
+        for key in ('frames_max_age_h', 'evidence_max_age_h'):
+            v = policy.get(key, 6 if key.startswith('frames') else 2)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                raise ValueError(f'{key} must be a positive number')
+            ages[key] = float(v)
+        out = dict(enabled=enabled, **ages)
+        tmp = self.run_dir/'GC.tmp'
+        tmp.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+        tmp.replace(self.run_dir/'GC.json')
+        return out
+
+    KEEP_SUFFIX = ('-before.png', '-after.png')
+
+    def gc(self, policy):
+        if not policy or not policy.get('enabled'):
+            return dict(deleted_frames=0, freed_frames_mb=0,
+                        deleted_evidence=0, freed_evidence_mb=0)
+        now = time.time()
+        frames_age = policy.get('frames_max_age_h', 6)*3600
+        evidence_age = policy.get('evidence_max_age_h', 2)*3600
+        deleted_frames = freed_frames = deleted_evidence = freed_evidence = 0
+        frames = self.run_dir/'frames'
+        if frames.is_dir():
+            for p in frames.glob('*.jpg'):
+                if now-p.stat().st_mtime > frames_age:
+                    freed_frames += p.stat().st_size
+                    p.unlink()
+                    deleted_frames += 1
+        for p in self.run_dir.glob('*.png'):
+            if p.name.startswith('latest-') or p.name.endswith(self.KEEP_SUFFIX):
+                continue
+            if now-p.stat().st_mtime > evidence_age:
+                freed_evidence += p.stat().st_size
+                p.unlink()
+                deleted_evidence += 1
+        return dict(deleted_frames=deleted_frames, freed_frames_mb=round(freed_frames/1048576, 1),
+                    deleted_evidence=deleted_evidence, freed_evidence_mb=round(freed_evidence/1048576, 1))
 
     def data(self, tl_after=0, ev_after=0):
         state = None
@@ -138,6 +199,9 @@ class Handler(BaseHTTPRequestHandler):
             page = Path(__file__).parent/'viewer.html'
             self._send(200, page.read_bytes(), 'text/html; charset=utf-8', 'no-cache')
             return
+        if u.path == '/api/gc':
+            self._json({'policy': self.viewer.policy()})
+            return
         if u.path == '/api/data':
             q = parse_qs(u.query)
             try:
@@ -176,7 +240,36 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(self.viewer.cleanup_frames(age))
             return
+        if path == '/api/gc':
+            body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+            try:
+                opts = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._json({'error': 'bad json'}, 400)
+                return
+            try:
+                self._json({'policy': self.viewer.set_policy(opts)})
+            except ValueError as e:
+                self._json({'error': str(e)}, 400)
+            return
         self._json({'error': 'not found'}, 404)
+
+
+def janitor(viewer: Viewer, interval_s: float = 60):
+    """Daemon thread applying <run>/GC.json every minute. Without a policy
+    file it never deletes anything, so old run dirs are safe by default."""
+    def loop():
+        while True:
+            try:
+                policy = viewer.policy()
+                if policy and policy.get('enabled'):
+                    result = viewer.gc(policy)
+                    if result['deleted_frames'] or result['deleted_evidence']:
+                        print(f'janitor: {result}', flush=True)
+            except Exception as e:  # keep the janitor alive no matter what
+                print(f'janitor error: {e}', flush=True)
+            time.sleep(interval_s)
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def main():
@@ -186,6 +279,7 @@ def main():
     parser.add_argument('--port', type=int, default=8788)
     args = parser.parse_args()
     Handler.viewer = Viewer(args.run_dir)
+    janitor(Handler.viewer)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
     print(f'viewer: http://{args.host}:{httpd.server_address[1]}  (run dir: {args.run_dir})', flush=True)

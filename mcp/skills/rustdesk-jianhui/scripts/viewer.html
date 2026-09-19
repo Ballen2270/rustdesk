@@ -195,6 +195,8 @@ body.win-right tr[data-win=left]{display:none}
 .log-line .w{color:var(--blue)}
 .lg-intent{color:var(--amber)} .lg-sent{color:var(--green)} .lg-confirmed{color:var(--green)}
 .lg-error{color:var(--red)} .lg-abort{color:var(--panelstate)} .lg-obs{color:var(--dim)} .lg-stop{color:var(--red)}
+.log-line .xn{color:var(--amber);font-weight:600;margin-left:8px}
+body.log-key-only .lg-obs{display:none}
 
 /* ---------- gallery ---------- */
 .strips{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));padding:14px 16px}
@@ -282,7 +284,12 @@ footer{max-width:1560px;margin:0 auto;padding:6px 22px 26px;color:var(--faint);
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2>事件日志</h2><div class="hint" id="evCount"></div></div>
+      <div class="panel-head"><h2>事件日志</h2><div class="hint" id="evCount"></div>
+        <div class="controls">
+          <input type="checkbox" id="logKeyOnly"><label for="logKeyOnly">只看关键</label>
+          <button id="logClearBtn" title="只清空本视图,磁盘上的 events.jsonl 不受影响">清空视图</button>
+        </div>
+      </div>
       <div class="log-wrap" id="logPane"></div>
     </section>
   </div>
@@ -321,13 +328,18 @@ footer{max-width:1560px;margin:0 auto;padding:6px 22px 26px;color:var(--faint);
       <select id="setLog"><option value="400">400</option><option value="800">800</option>
         <option value="1600">1600</option></select></label>
     <div class="set-sep"></div>
-    <label>自动清理关键帧(frames/)
-      <select id="setAutoClean"><option value="0">关闭</option><option value="1">保留 1 小时</option>
-        <option value="6">保留 6 小时</option><option value="24">保留 24 小时</option></select></label>
+    <label>自动清理(janitor,写入运行目录 GC.json)
+      <select id="setGc"><option value="0">关闭</option><option value="1">开启</option></select></label>
+    <label>关键帧流 frames/ 保留
+      <select id="setGcFrames"><option value="1">1 小时</option><option value="6">6 小时</option>
+        <option value="24">24 小时</option><option value="168">7 天</option></select></label>
+    <label>状态变化证据帧保留
+      <select id="setGcEvidence"><option value="1">1 小时</option><option value="2">2 小时</option>
+        <option value="6">6 小时</option><option value="24">24 小时</option></select></label>
     <label>「清理历史帧」按钮保留期
       <select id="setCleanKeep"><option value="0">全部清理</option><option value="1">保留最近 1 小时</option>
         <option value="6">保留最近 6 小时</option><option value="24">保留最近 24 小时</option></select></label>
-    <div class="hint">设置保存在本浏览器(localStorage);操作前后帧与状态变化证据永远不清理。</div>
+    <div class="hint">UI 偏好存本浏览器;自动清理策略存运行目录 GC.json(无此文件 = 从不自动删)。操作前后帧与 latest 永不清理;磁盘上的 events/timeline 日志永不自动清理。</div>
   </div>
 </aside>
 
@@ -343,7 +355,7 @@ const S = {
   tl:0, ev:0, paused:false, names:[], cards:{}, lanes:{}, stats:{}, latency:{},
   firstTs:null, seenImg:new Set(), stopArmed:false, stopTimer:null, logPinned:true,
 };
-const CFG_DEFAULT = {pollMs:1000, laneCap:720, tlRows:500, logLines:800, autoCleanH:0, cleanKeepH:0};
+const CFG_DEFAULT = {pollMs:1000, laneCap:720, tlRows:500, logLines:800, cleanKeepH:0};
 S.cfg = Object.assign({}, CFG_DEFAULT, (()=>{ try{return JSON.parse(localStorage.getItem('jianhui-console')||'{}')}catch(e){return {}} })());
 const saveCfg = ()=>localStorage.setItem('jianhui-console', JSON.stringify(S.cfg));
 
@@ -531,15 +543,28 @@ function appendLog(events){
     else if(e.intent) detail = `${e.intent} → ${e.before||''}`;
     else if(e.observation) detail = `${e.observation.state||'?'} count=${e.count??'?'} ${e.evidence||''}`;
     else detail = JSON.stringify(e).slice(0,160);
+    const gkey = `${cls}|${e.window||''}|${label}|${detail.slice(0,80)}`;
+    const last = pane.lastElementChild;
+    if(last && last.dataset.g === gkey){
+      // repeated identical entry: fold into the previous line with ×N
+      last.dataset.n = String(Number(last.dataset.n||1)+1);
+      const xn = last.querySelector('.xn');
+      if(xn) xn.textContent = ` ×${last.dataset.n}`;
+      continue;
+    }
     const line = document.createElement('div');
     line.className = `log-line lg-${cls}`;
-    line.innerHTML = `<span class="ts">${hhmmss(e.time)}</span> ${w}${label} ${detail}`;
+    line.dataset.g = gkey; line.dataset.n = '1';
+    line.innerHTML = `<span class="ts">${hhmmss(e.time)}</span> ${w}${label} ${detail}<span class="xn"></span>`;
     pane.appendChild(line);
   }
   while(pane.children.length>S.cfg.logLines) pane.firstElementChild.remove();
   if(S.logPinned) pane.scrollTop = pane.scrollHeight;
   $('#evCount').textContent = S.ev?`共 ${S.ev} 条`:'';
 }
+$('#logKeyOnly').addEventListener('change',ev=>
+  document.body.classList.toggle('log-key-only',ev.target.checked));
+$('#logClearBtn').addEventListener('click',()=>{ $('#logPane').innerHTML=''; });
 $('#logPane').addEventListener('scroll',ev=>{
   const el = ev.target;
   S.logPinned = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
@@ -611,34 +636,39 @@ poll();
 
 /* ---------- settings panel ---------- */
 const SETTINGS_FIELDS = [['setPoll','pollMs'],['setLane','laneCap'],['setTl','tlRows'],
-                         ['setLog','logLines'],['setAutoClean','autoCleanH'],['setCleanKeep','cleanKeepH']];
+                         ['setLog','logLines'],['setCleanKeep','cleanKeepH']];
 function openSettings(){ $('#settings').classList.remove('hidden'); }
 function closeSettings(){ $('#settings').classList.add('hidden'); }
-function applyAutoClean(){
-  // Re-arms the periodic frames/ GC; the viewer POSTs with the chosen age.
-  if(S.cleanTimer) clearInterval(S.cleanTimer);
-  if(S.cfg.autoCleanH > 0){
-    S.cleanTimer = setInterval(async ()=>{
-      if(S.paused) return;
-      try{ await fetch('/api/cleanup',{method:'POST',
-        body:JSON.stringify({max_age_seconds:S.cfg.autoCleanH*3600})}); }catch(e){}
-    }, 10*60*1000);
-  }
-}
 function syncSettingsUI(){
   for(const [id, key] of SETTINGS_FIELDS) $('#'+id).value = String(S.cfg[key]);
 }
+function syncGcUI(p){
+  $('#setGc').value = p && p.enabled ? '1' : '0';
+  $('#setGcFrames').value = String(p ? (p.frames_max_age_h||6) : 6);
+  $('#setGcEvidence').value = String(p ? (p.evidence_max_age_h||2) : 2);
+}
+async function saveGc(){
+  const policy = {enabled: $('#setGc').value==='1',
+                  frames_max_age_h: Number($('#setGcFrames').value),
+                  evidence_max_age_h: Number($('#setGcEvidence').value)};
+  try{ const r = await (await fetch('/api/gc',{method:'POST',
+      body:JSON.stringify(policy)})).json(); syncGcUI(r.policy); }
+  catch(e){ /* transient */ }
+}
+['setGc','setGcFrames','setGcEvidence'].forEach(id=>
+  $('#'+id).addEventListener('change', saveGc));
 SETTINGS_FIELDS.forEach(([id, key])=>{
   $('#'+id).addEventListener('change', ev=>{
     S.cfg[key] = Number(ev.target.value); saveCfg();
     if(key === 'pollMs') startPoll();
-    if(key === 'autoCleanH') applyAutoClean();
   });
 });
-$('#settingsBtn').addEventListener('click', openSettings);
+$('#settingsBtn').addEventListener('click', ()=>{
+  openSettings();
+  fetch('/api/gc').then(r=>r.json()).then(d=>syncGcUI(d.policy)).catch(()=>{});
+});
 $('#setClose').addEventListener('click', closeSettings);
 syncSettingsUI();
-applyAutoClean();
 
 /* ---------- controls ---------- */
 $('#pauseBtn').addEventListener('click',ev=>{
