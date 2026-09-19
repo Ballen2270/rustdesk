@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -84,6 +85,22 @@ class Viewer:
     def stop(self):
         (self.run_dir/'STOP').touch()
 
+    def cleanup_frames(self, max_age_s=0.0):
+        """Delete frames/*.jpg (the bulk storage). Evidence shots in the run
+        root — state-change frames and action before/after pairs — are never
+        touched. max_age_s > 0 only deletes files older than that."""
+        frames = self.run_dir/'frames'
+        freed, count = 0, 0
+        if frames.is_dir():
+            now = time.time()
+            for p in sorted(frames.glob('*.jpg')):
+                if max_age_s > 0 and now-p.stat().st_mtime <= max_age_s:
+                    continue
+                freed += p.stat().st_size
+                p.unlink()
+                count += 1
+        return dict(deleted=count, freed_bytes=freed)
+
     def image_path(self, name):
         parts = name.split('/')
         if len(parts) > 2 or any(p in ('', '.', '..') or not SAFE_PART.match(p) for p in parts):
@@ -141,9 +158,23 @@ class Handler(BaseHTTPRequestHandler):
         self._json({'error': 'not found'}, 404)
 
     def do_POST(self):
-        if urlparse(self.path).path == '/api/stop':
+        path = urlparse(self.path).path
+        if path == '/api/stop':
             self.viewer.stop()
             self._json({'stopped': True})
+            return
+        if path == '/api/cleanup':
+            body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+            try:
+                opts = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._json({'error': 'bad json'}, 400)
+                return
+            age = opts.get('max_age_seconds', 0)
+            if not isinstance(age, (int, float)) or age < 0:
+                self._json({'error': 'bad max_age_seconds'}, 400)
+                return
+            self._json(self.viewer.cleanup_frames(age))
             return
         self._json({'error': 'not found'}, 404)
 

@@ -19,7 +19,7 @@ $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/jianhui.py run --repo $REPO --conf
 $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/jianhui.py run --repo $REPO --config /private/tmp/jianhui-pc1.json --output /private/tmp/jianhui-run --execute --games 10
 ```
 
-run 可选参数:`--viewer` 随运行拉起网页观察台(`--viewer-port`,默认 8788;端口被占时运行不受影响);`--keep-frames all` 额外把每轮画面存为 `frames/*.jpg`(约 1GB/小时);`--mcp-spec` 指向替代 mcpServers JSON,用于离线 mock,会跳过 fleet 配置检查。
+run 可选参数:`--viewer` 随运行拉起网页观察台(`--viewer-port`,默认 8788;端口被占时运行不受影响);`--keep-frames all` 额外按 `--frame-interval`(默认 5 秒,0 = 每轮)把关键帧存为 `frames/*.jpg`,操作前后帧与状态变化帧不受采样影响、永远保留;`--mcp-spec` 指向替代 mcpServers JSON,用于离线 mock,会跳过 fleet 配置检查。观察台截图证据区有「清理历史帧」按钮,手动清空 `frames/`(证据帧不受影响);运行目录在 /private/tmp 下,macOS 也会自动清理三天未访问的文件。
 
 用终端长任务会话启动并保留 session_id;不要使进程脱离管理。run 本身是长循环,大模型无需持续调用截图。通过 state.json 看 mode、status、counts、last_observations、loop_seconds。events.jsonl 留存识别变化、操作意图和结果。timeline.jsonl 逐轮记录每窗口观察(状态、来源、准备槽、计数、动作、确认、识别耗时、锚点数),是复盘时序的数据源。匹配/关闭点击前后各存一张 `-before/-after` 截图并在 events 中引用;latest-left.png / latest-right.png 为最近区域图。不把这些含账号信息的文件提交。
 

@@ -270,7 +270,12 @@ footer{max-width:1560px;margin:0 auto;padding:6px 22px 26px;color:var(--faint);
   </div>
 
   <section class="panel">
-    <div class="panel-head"><h2>截图证据</h2><div class="hint">状态变化帧 · 操作前后对照 · 点击放大</div></div>
+    <div class="panel-head"><h2>截图证据</h2><div class="hint">状态变化帧 · 操作前后对照 · 点击放大</div>
+      <div class="controls">
+        <span class="hint" id="cleanInfo"></span>
+        <button id="cleanBtn" class="danger">清理历史帧</button>
+      </div>
+    </div>
     <div class="strips" id="gallery"></div>
   </section>
 </main>
@@ -571,6 +576,23 @@ $('#stopBtn').addEventListener('click',async ev=>{
   try{ await fetch('/api/stop',{method:'POST'}); btn.textContent='已请求停止'; }
   catch(e){ btn.textContent='请求失败'; }
   btn.disabled = true;
+});
+let cleanArmed=false, cleanTimer=null;
+$('#cleanBtn').addEventListener('click',async ev=>{
+  const btn = ev.target;
+  if(!cleanArmed){
+    cleanArmed = true; btn.textContent = '确认清理 frames/？'; btn.classList.add('armed');
+    cleanTimer = setTimeout(()=>{cleanArmed=false;btn.textContent='清理历史帧';btn.classList.remove('armed');},3000);
+    return;
+  }
+  clearTimeout(cleanTimer);
+  cleanArmed = false; btn.textContent='清理中…'; btn.disabled = true;
+  try{
+    const r = await (await fetch('/api/cleanup',{method:'POST',body:'{}'})).json();
+    $('#cleanInfo').textContent = r.deleted!=null ? `已清理 ${r.deleted} 张，释放 ${(r.freed_bytes/1048576).toFixed(1)} MB` : '清理失败';
+    S.seenImg.clear(); $('#gallery').innerHTML = '';
+  }catch(e){ $('#cleanInfo').textContent = '清理失败'; }
+  btn.textContent='清理历史帧'; btn.classList.remove('armed'); btn.disabled = false;
 });
 </script>
 </body>

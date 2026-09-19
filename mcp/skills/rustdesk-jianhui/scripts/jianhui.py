@@ -352,6 +352,7 @@ async def run(args):
                         raise RuntimeError('Crop resized or clipped')
                     return img
                 devices = sorted({cfg['device'], *(win_device(w) for w in cfg['windows'])})
+                last_frame: dict[str, float] = {}
                 lease = 0
                 loop_index = 0
                 anchors = [BattleAnchors() for _ in cfg['windows']]
@@ -413,7 +414,8 @@ async def run(args):
                                      warning=s.get('warning'), paused=s.get('paused'),
                                      recognition_seconds=obs['recognition_seconds'],
                                      anchors=len(anchors[i].references))
-                        if args.keep_frames == 'all':
+                        if args.keep_frames == 'all' and time.monotonic()-last_frame.get(win['name'], 0) >= args.frame_interval:
+                            last_frame[win['name']] = time.monotonic()
                             frame = f"frames/{loop_index:06d}-{win['name']}.jpg"
                             img.save(args.output/frame, quality=75)
                             entry['frame'] = frame
@@ -481,7 +483,9 @@ def main():
     live.add_argument('--minutes', type=float, default=0, help='Optional task limit in minutes; 0 means no time limit')
     live.add_argument('--mcp-spec', type=Path, help='Alternate mcpServers spec JSON (offline mock); skips the fleet config check')
     live.add_argument('--keep-frames', choices=('changes', 'all'), default='changes',
-                      help="all additionally saves every loop frame as frames/*.jpg (~1GB/hour)")
+                      help="all additionally saves loop frames as frames/*.jpg, sampled every --frame-interval")
+    live.add_argument('--frame-interval', type=float, default=5.0,
+                      help='seconds between saved frames/ keyframes in keep-frames=all (0 = every loop)')
     live.add_argument('--viewer', action='store_true', help='Spawn the read-only web viewer on the run directory')
     live.add_argument('--viewer-port', type=int, default=8788)
     ckpt = sub.add_parser('checkpoint', help='Package a stopped, reconciled run into an explicit --resume-state file')
@@ -503,6 +507,8 @@ def main():
         return 0
     if not 1 <= args.games <= 10 or not math.isfinite(args.minutes) or args.minutes < 0:
         parser.error('games must be 1..10; minutes must be finite and >= 0 (0 disables the task limit)')
+    if not math.isfinite(args.frame_interval) or args.frame_interval < 0:
+        parser.error('frame-interval must be finite and >= 0')
     return asyncio.run(run(args))
 
 

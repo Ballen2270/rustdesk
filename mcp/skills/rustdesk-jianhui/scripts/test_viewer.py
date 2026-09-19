@@ -2,6 +2,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -80,6 +81,37 @@ class ViewerTests(unittest.TestCase):
                 self.assertEqual(json.loads(r.read()), {'stopped': True})
         self.assertTrue((self.dir/'STOP').exists())
         self.assertTrue(json.loads(self.get('/api/data'))['stopped'])
+
+    def test_cleanup_deletes_only_frames_dir(self):
+        old = self.dir/'frames'/'000000-old.jpg'
+        old.write_bytes(b'\xff\xd8old')
+        import os
+        past = time.time()-3600
+        os.utime(old, (past, past))
+        fresh = self.dir/'frames'/'000002-fresh.jpg'
+        Image.new('RGB', (4, 3), 'white').save(fresh)
+        evidence = self.dir/'latest-left.png'
+        before = evidence.stat().st_size
+
+        req = urllib.request.Request(self.base+'/api/cleanup', method='POST',
+                                     data=json.dumps(dict(max_age_seconds=60)).encode())
+        with urllib.request.urlopen(req) as r:
+            d = json.loads(r.read())
+        self.assertEqual(d['deleted'], 1)  # only the aged frame
+        self.assertGreater(d['freed_bytes'], 0)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())    # fresh frame survives max_age
+
+        req = urllib.request.Request(self.base+'/api/cleanup', method='POST', data=b'{}')
+        with urllib.request.urlopen(req) as r:
+            d = json.loads(r.read())
+        self.assertEqual(d['deleted'], 2)  # the fresh one + the shared fixture
+        self.assertFalse(fresh.exists())
+        self.assertTrue(evidence.exists())  # run-root evidence untouched
+        self.assertEqual(evidence.stat().st_size, before)
+        # restore the shared fixture other tests rely on (unittest runs this
+        # class's tests in alphabetical order)
+        Image.new('RGB', (4, 3), 'green').save(self.dir/'frames'/'000001-left.jpg')
 
     def test_index_serves_viewer_html(self):
         body = self.get('/')
