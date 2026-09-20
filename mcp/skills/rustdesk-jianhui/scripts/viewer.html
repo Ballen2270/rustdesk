@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>剑会观察台 · Jianhui Console</title>
+<title>运行观察台 · Run Console</title>
 <style>
 :root{
   --bg:#0b0f14; --panel:#101722; --panel2:#0d131c; --line:#1c2836; --line2:#243447;
@@ -11,6 +11,9 @@
   --amber:#ffb454; --red:#ff5d5d; --green:#35d07f; --violet:#a78bfa; --blue:#5aa9ff; --gold:#ffcf5c;
   --room:#5aa9ff; --ready:#35d07f; --matching:#a78bfa; --battle:#ff5d5d; --result:#ffcf5c;
   --kickwarn:#ffb454; --panelstate:#ff9151; --unknown:#55677a;
+  --normal:var(--room); --in_instance:var(--violet); --fight_menu:var(--kickwarn);
+  --mijing_panel:var(--panelstate); --yunleyou_menu:var(--matching);
+  --activity_panel:var(--matching); --cleared:var(--ready);
   --disp:"Avenir Next Condensed","Futura","Helvetica Neue","PingFang SC",sans-serif;
   --body:"PingFang SC","Helvetica Neue","Noto Sans SC","Microsoft YaHei",sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;
@@ -30,17 +33,41 @@ body{
 ::-webkit-scrollbar-thumb{background:#26374a;border-radius:5px}
 ::-webkit-scrollbar-track{background:transparent}
 
-/* ---------- header ---------- */
+/* ---------- header + tabs ---------- */
 header{
   position:sticky;top:0;z-index:20;
-  display:flex;align-items:center;gap:20px;flex-wrap:wrap;
-  padding:14px 22px;
+  padding:0;
   background:rgba(11,15,20,.92);backdrop-filter:blur(8px);
   border-bottom:1px solid var(--line);
 }
 header::after{
   content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
   background:linear-gradient(90deg,var(--amber),rgba(167,139,250,.55) 40%,transparent 80%);
+}
+.hrow{
+  display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:12px 22px 9px;
+}
+.tabs{
+  display:flex;gap:2px;align-items:stretch;
+  padding:0 14px;border-top:1px solid rgba(28,40,54,.55);
+  overflow-x:auto;scrollbar-width:none;
+}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{
+  border:0;background:none;border-radius:8px 8px 0 0;
+  padding:8px 16px 9px;color:var(--dim);font-size:13px;letter-spacing:.06em;
+  border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;
+}
+.tabs button:hover{color:var(--text);background:rgba(90,169,255,.05)}
+.tabs button.active{
+  color:var(--amber);border-bottom-color:var(--amber);
+  background:linear-gradient(180deg,rgba(255,180,84,.09),transparent);
+  text-shadow:0 0 12px rgba(255,180,84,.25);
+}
+.tabs .badge-n{
+  font-family:var(--mono);font-size:9.5px;padding:1px 6px;border-radius:8px;
+  background:rgba(90,169,255,.12);color:var(--blue);margin-left:7px;vertical-align:1px;
 }
 .brand{display:flex;align-items:center;gap:13px}
 .mark{
@@ -78,8 +105,15 @@ button.danger:hover{background:rgba(255,93,93,.12)}
 button.danger.armed{background:var(--red);border-color:var(--red);color:#fff}
 button:disabled{opacity:.55;cursor:default}
 
-/* ---------- layout ---------- */
-main{max-width:1560px;margin:0 auto;padding:20px 22px 8px;display:grid;gap:18px}
+/* ---------- layout: tab views ---------- */
+main{max-width:1560px;margin:0 auto;padding:16px 22px 10px;display:grid;gap:16px}
+.view{display:none}
+.view.active{display:grid;gap:16px}
+#view-timeline.active,#view-gallery.active{
+  height:calc(100vh - var(--headh,150px) - 26px);
+  overflow:hidden;
+}
+:root{--headh:150px}
 .panel{
   background:linear-gradient(180deg,var(--panel),var(--panel2));
   border:1px solid var(--line);border-radius:13px;
@@ -122,10 +156,19 @@ select{color:var(--text);font-family:var(--body)}
 .st-kickwarn{color:var(--kickwarn);border-color:rgba(255,180,84,.5);background:rgba(255,180,84,.1);animation:pulse 1.2s infinite}
 .st-panel{color:var(--panelstate);border-color:rgba(255,145,81,.4);background:rgba(255,145,81,.08)}
 .st-unknown{color:var(--unknown);border-color:rgba(85,103,122,.5);background:rgba(85,103,122,.1)}
+/* workflow-skill states (mijing) + generic fallback */
+.st-normal{color:var(--room);border-color:rgba(90,169,255,.4);background:rgba(90,169,255,.08)}
+.st-in_instance{color:var(--violet);border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.08)}
+.st-fight_menu{color:var(--kickwarn);border-color:rgba(255,180,84,.5);background:rgba(255,180,84,.1);animation:pulse 1.2s infinite}
+.st-mijing_panel{color:var(--panelstate);border-color:rgba(255,145,81,.4);background:rgba(255,145,81,.08)}
+.st-yunleyou_menu{color:var(--matching);border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.08)}
+.st-activity_panel{color:var(--matching);border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.08)}
+.st-cleared{color:var(--ready);border-color:rgba(53,208,127,.4);background:rgba(53,208,127,.08)}
+.badge{color:var(--blue);border-color:rgba(90,169,255,.35);background:rgba(90,169,255,.07)}
 .card .count{margin-left:auto;font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
 .card .count b{color:var(--amber)}
-.shot{position:relative;background:#05080c;min-height:180px;display:grid;place-items:center;border-bottom:1px solid var(--line)}
-.shot img{display:block;width:100%;max-height:330px;object-fit:contain}
+.shot{position:relative;background:#05080c;min-height:120px;display:grid;place-items:center;border-bottom:1px solid var(--line)}
+.shot img{display:block;width:100%;max-height:212px;object-fit:contain}
 .shot .empty{color:var(--faint);font-family:var(--mono);font-size:12px;letter-spacing:.3em}
 .shot .live{
   position:absolute;top:8px;left:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.22em;
@@ -156,18 +199,23 @@ select{color:var(--text);font-family:var(--body)}
 .lane-row:last-child{border-bottom:none}
 .lane-row .win-tag{flex:none}
 .lane{display:flex;gap:1px;flex:1;overflow-x:auto;scrollbar-width:thin;padding:2px 0}
-.cell{width:5px;height:22px;border-radius:1.5px;flex:none;cursor:default}
+.cell{width:5px;height:22px;border-radius:1.5px;flex:none;cursor:default;background:var(--blue)}
 .cell.minor{opacity:.82}
 .c-room{background:var(--room)} .c-ready{background:var(--ready)} .c-matching{background:var(--matching)}
 .c-battle{background:var(--battle)} .c-result{background:var(--result)} .c-panel{background:var(--panelstate)}
 .c-kickwarn{background:var(--kickwarn)}
 .c-unknown{background:var(--unknown)}
+.c-normal{background:var(--room)} .c-in_instance{background:var(--violet)} .c-fight_menu{background:var(--kickwarn)}
+.c-mijing_panel{background:var(--panelstate)} .c-yunleyou_menu{background:var(--matching)}
+.c-activity_panel{background:var(--matching)} .c-cleared{background:var(--ready)}
 .lane-time{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);width:52px;text-align:right}
 
 /* ---------- split: timeline + log ---------- */
-.split{display:grid;gap:18px}
+.split{display:grid;gap:16px;min-height:0}
 @media(min-width:1020px){.split{grid-template-columns:minmax(0,1fr) minmax(300px,380px)}}
-.table-wrap{overflow:auto;max-height:420px}
+.view.active>.split{height:100%}
+.split>.panel{display:flex;flex-direction:column;min-height:0}
+.table-wrap{overflow:auto;flex:1;min-height:0}
 table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums}
 thead th{
   position:sticky;top:0;background:#0e151f;color:var(--faint);font-weight:500;text-align:left;
@@ -180,16 +228,15 @@ td .s{display:inline-flex;align-items:center;gap:5px}
 td .s::before{content:"";width:7px;height:7px;border-radius:2px;background:currentColor}
 tbody tr[data-win=left] td:first-child{box-shadow:inset 2px 0 0 rgba(90,169,255,.55)}
 tbody tr[data-win=right] td:first-child{box-shadow:inset 2px 0 0 rgba(255,145,81,.55)}
-.act{display:inline-block;padding:1px 8px;border-radius:5px;font-size:10.5px;border:1px solid}
+.act{display:inline-block;padding:1px 8px;border-radius:5px;font-size:10.5px;border:1px solid;
+  color:var(--blue);border-color:rgba(90,169,255,.45)}
 .act-match{color:var(--amber);border-color:rgba(255,180,84,.5)}
 .act-close{color:var(--panelstate);border-color:rgba(255,145,81,.5)}
 .ok{color:var(--green);font-size:10.5px}
 .warnmark{color:var(--gold)} .stopmark{color:var(--red)}
 body.key-only tr.minor{display:none}
-body.win-left tr[data-win=right]{display:none}
-body.win-right tr[data-win=left]{display:none}
 
-.log-wrap{height:420px;overflow:auto;padding:10px 14px;font-family:var(--mono);font-size:11px;line-height:1.75}
+.log-wrap{flex:1;min-height:0;overflow:auto;padding:10px 14px;font-family:var(--mono);font-size:11px;line-height:1.75}
 .log-line{white-space:pre-wrap;word-break:break-all;color:var(--dim)}
 .log-line .ts{color:var(--faint)}
 .log-line .w{color:var(--blue)}
@@ -199,7 +246,9 @@ body.win-right tr[data-win=left]{display:none}
 body.log-key-only .lg-obs{display:none}
 
 /* ---------- gallery ---------- */
-.strips{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));padding:14px 16px}
+#view-gallery .panel{height:100%;display:flex;flex-direction:column;min-height:0}
+.strips{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));padding:14px 16px;
+  overflow:auto;flex:1;min-height:0;align-content:start}
 figure{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#05080c;cursor:zoom-in;transition:border-color .15s}
 figure:hover{border-color:var(--amber)}
 figure img{display:block;width:100%;height:118px;object-fit:cover;object-position:top;background:#0a0f15}
@@ -244,64 +293,75 @@ footer{max-width:1560px;margin:0 auto;padding:6px 22px 26px;color:var(--faint);
 </head>
 <body>
 <header>
-  <div class="brand">
-    <div class="mark">剑</div>
-    <div><h1>剑会观察台</h1><div class="sub">JIANHUI CONSOLE</div></div>
+  <div class="hrow">
+    <div class="brand">
+      <div class="mark">观</div>
+      <div><h1>运行观察台</h1><div class="sub">RUN CONSOLE</div></div>
+    </div>
+    <div class="meta" id="meta"><span class="chip"><span class="dot" id="connDot"></span><span id="connText">连接中</span></span></div>
+    <div class="actions">
+      <button id="pauseBtn">暂停刷新</button>
+      <button id="settingsBtn" title="设置">⚙ 设置</button>
+      <button id="stopBtn" class="danger">停止运行</button>
+    </div>
   </div>
-  <div class="meta" id="meta"><span class="chip"><span class="dot" id="connDot"></span><span id="connText">连接中</span></span></div>
-  <div class="actions">
-    <button id="pauseBtn">暂停刷新</button>
-    <button id="settingsBtn" title="设置">⚙ 设置</button>
-    <button id="stopBtn" class="danger">停止运行</button>
-  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="overview" class="active">总览</button>
+    <button data-tab="timeline">时序 / 日志</button>
+    <button data-tab="gallery">截图证据<span class="badge-n" id="galN"></span></button>
+  </nav>
 </header>
 
 <main>
-  <section class="cards" id="cards"></section>
+  <section class="view active" id="view-overview">
+    <section class="cards" id="cards"></section>
 
-  <section class="panel">
-    <div class="panel-head"><h2>状态泳道</h2><div class="hint">每格一次观察 · 新的追加在右侧 · hover 看详情</div>
-      <div class="controls"><span class="hint" id="laneInfo"></span></div>
-    </div>
-    <div id="lanes"></div>
+    <section class="panel">
+      <div class="panel-head"><h2>状态泳道</h2><div class="hint">每格一次观察 · hover 看详情</div>
+        <div class="controls"><span class="hint" id="laneInfo"></span></div>
+      </div>
+      <div id="lanes"></div>
+    </section>
   </section>
 
-  <div class="split">
-    <section class="panel">
-      <div class="panel-head"><h2>操作时序</h2>
-        <div class="controls">
-          <select id="winFilter">
-            <option value="">全部窗口</option><option value="left">left</option><option value="right">right</option>
-          </select>
-          <input type="checkbox" id="keyOnly"><label for="keyOnly">只看动作/异常</label>
+  <section class="view" id="view-timeline">
+    <div class="split">
+      <section class="panel">
+        <div class="panel-head"><h2>操作时序</h2>
+          <div class="controls">
+            <select id="winFilter"><option value="">全部窗口</option></select>
+            <input type="checkbox" id="keyOnly"><label for="keyOnly">只看动作/异常</label>
+          </div>
         </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>时间</th><th>窗</th><th>状态</th><th>识别</th><th>准备</th><th>场次</th><th>动作</th><th>耗时</th><th>锚点</th></tr></thead>
-          <tbody id="tlBody"></tbody>
-        </table>
-      </div>
-    </section>
-    <section class="panel">
-      <div class="panel-head"><h2>事件日志</h2><div class="hint" id="evCount"></div>
-        <div class="controls">
-          <input type="checkbox" id="logKeyOnly"><label for="logKeyOnly">只看关键</label>
-          <button id="logClearBtn" title="只清空本视图,磁盘上的 events.jsonl 不受影响">清空视图</button>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>窗</th><th>状态</th><th>识别</th><th>准备</th><th>场次</th><th>动作</th><th>耗时</th><th>锚点</th></tr></thead>
+            <tbody id="tlBody"></tbody>
+          </table>
         </div>
-      </div>
-      <div class="log-wrap" id="logPane"></div>
-    </section>
-  </div>
-
-  <section class="panel">
-    <div class="panel-head"><h2>截图证据</h2><div class="hint">状态变化帧 · 操作前后对照 · 点击放大</div>
-      <div class="controls">
-        <span class="hint" id="cleanInfo"></span>
-        <button id="cleanBtn" class="danger">清理历史帧</button>
-      </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>事件日志</h2><div class="hint" id="evCount"></div>
+          <div class="controls">
+            <input type="checkbox" id="logKeyOnly"><label for="logKeyOnly">只看关键</label>
+            <button id="logClearBtn" title="只清空本视图,磁盘上的 events.jsonl 不受影响">清空视图</button>
+          </div>
+        </div>
+        <div class="log-wrap" id="logPane"></div>
+      </section>
     </div>
-    <div class="strips" id="gallery"></div>
+  </section>
+
+  <section class="view" id="view-gallery">
+    <section class="panel">
+      <div class="panel-head"><h2>截图证据</h2><div class="hint">状态变化帧 · 操作前后对照 · 点击放大</div>
+        <div class="controls">
+          <span class="hint" id="cleanInfo"></span>
+          <button id="cleanBtn" class="danger">清理历史帧</button>
+        </div>
+      </div>
+      <div class="strips" id="gallery"></div>
+    </section>
   </section>
 </main>
 
@@ -354,10 +414,27 @@ const SRC_TITLE = {roi_ocr:'分区OCR', full_ocr_fallback:'全图OCR兜底', loc
 const S = {
   tl:0, ev:0, paused:false, names:[], cards:{}, lanes:{}, stats:{}, latency:{},
   firstTs:null, seenImg:new Set(), stopArmed:false, stopTimer:null, logPinned:true,
+  winFilter:'',
 };
-const CFG_DEFAULT = {pollMs:1000, laneCap:720, tlRows:500, logLines:800, cleanKeepH:0};
+const CFG_DEFAULT = {pollMs:1000, laneCap:720, tlRows:500, logLines:800, cleanKeepH:0, tab:'overview'};
 S.cfg = Object.assign({}, CFG_DEFAULT, (()=>{ try{return JSON.parse(localStorage.getItem('jianhui-console')||'{}')}catch(e){return {}} })());
 const saveCfg = ()=>localStorage.setItem('jianhui-console', JSON.stringify(S.cfg));
+
+/* ---------- tabs ---------- */
+function measureHead(){
+  const h = document.querySelector('header').offsetHeight;
+  document.documentElement.style.setProperty('--headh', h+'px');
+}
+function showTab(id){
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+id));
+  S.cfg.tab = id; saveCfg();
+  measureHead();
+}
+document.querySelectorAll('.tabs button').forEach(b=>
+  b.addEventListener('click', ()=>showTab(b.dataset.tab)));
+window.addEventListener('resize', measureHead);
+showTab(CFG_DEFAULT.tab && document.getElementById('view-'+S.cfg.tab) ? S.cfg.tab : 'overview');
 
 /* ---------- meta header ---------- */
 function chip(id,label,val){ return `<span class="chip" ${id?`id="${id}"`:''}>${label} <b>${val}</b></span>`; }
@@ -416,6 +493,11 @@ function ensureCards(d){
     S.cards[name] = el;
     S.lanes[name] = null; S.latency[name] = [];
   }
+  /* rebuild the window filter for whatever names this run actually uses */
+  const sel = $('#winFilter'); const cur = sel.value;
+  sel.innerHTML = '<option value="">全部窗口</option>'+
+    S.names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  if(S.names.includes(cur)) sel.value = cur; else { sel.value=''; S.winFilter=''; }
 }
 
 function pct(arr,p){ if(!arr.length) return null; const a=[...arr].sort((x,y)=>x-y);
@@ -492,6 +574,7 @@ function appendLanes(entries){
 function tlRow(e){
   const tr = document.createElement('tr');
   tr.dataset.win = e.window||'';
+  if(S.winFilter && e.window!==S.winFilter) tr.style.display='none';
   const key = !!(e.action||e.confirmed||e.warning||e.paused);
   tr.className = key?'key':'minor';
   const rd = (e.ready||[]).map(r=>r?'●':'○').join(' ');
@@ -594,6 +677,7 @@ function renderGallery(images){
     wrap.prepend(fig);
   }
   while(wrap.children.length>120) wrap.lastElementChild.remove();
+  $('#galN').textContent = wrap.children.length||'';
 }
 function openLightbox(name,cap){
   $('#lbImg').src = '/img/'+encodeURIComponent(name);
@@ -678,8 +762,9 @@ $('#pauseBtn').addEventListener('click',ev=>{
   if(!S.paused){ startPoll(); poll(); }
 });
 $('#winFilter').addEventListener('change',ev=>{
-  document.body.classList.remove('win-left','win-right');
-  if(ev.target.value) document.body.classList.add('win-'+ev.target.value);
+  S.winFilter = ev.target.value;
+  document.querySelectorAll('#tlBody tr').forEach(tr=>
+    tr.style.display = (!S.winFilter || tr.dataset.win===S.winFilter) ? '' : 'none');
 });
 $('#keyOnly').addEventListener('change',ev=>
   document.body.classList.toggle('key-only',ev.target.checked));
