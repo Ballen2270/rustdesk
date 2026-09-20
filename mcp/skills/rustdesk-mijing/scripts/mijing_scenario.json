@@ -27,7 +27,6 @@
     {"from": "cleared", "click_text": "离开", "box": [0.84, 0.40, 0.16, 0.14], "to": "normal", "settle": 1.0}
   ],
   "auto": [
-    {"from": "battle", "after": 2, "to": "in_instance", "count": 16},
     {"from": "battle", "after": 2, "to": "fight18", "count": 1},
     {"from": "battle", "after": 2, "to": "battle", "count": 5},
     {"from": "battle", "after": 2, "to": "fight24", "count": 1},

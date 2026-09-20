@@ -3,7 +3,7 @@ connect to a device and never run OCR (synthetic items only)."""
 import random
 import unittest
 
-from mijing import MijingWorkflow, battle_hits, build_screens, build_workflow, validate
+from mijing import MijingWorkflow, battle_hits, bookkeep, build_screens, build_workflow, validate
 from _framework.humanize import ClickPlanner, ScrollPlanner
 from _framework.workflow import find_row_button, find_text, level_of
 
@@ -127,6 +127,13 @@ class HelperTests(unittest.TestCase):
                                      '秘境降妖', '参加', (.20, .17, .78, .52))
         self.assertIsNone(missing)
 
+    def test_row_button_must_stay_in_search_box(self):
+        # A same-band button outside the list area must not be picked.
+        items = [item('秘境降妖', .67, .47, .10, .04),
+                 item('参加', .95, .47, .07, .05)]  # x center .985 > box right .98
+        _, btn = find_row_button(items, '秘境降妖', '参加', (.20, .17, .78, .52))
+        self.assertIsNone(btn)
+
 
 class PlannerTests(unittest.TestCase):
     def test_deterministic_with_seed(self):
@@ -199,6 +206,74 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(wf.nodes_for('battle'), [])
 
 
+class BookkeepTests(unittest.TestCase):
+    """Pause-don't-guess anomalies from the Codex review: failed level
+    replays and unearned cleared screens must reconcile, not retry."""
+
+    def fresh(self):
+        return dict(count=0, active=False, battle_seen=False, inst_since=None,
+                    inst_level=None, seen=None, pre_battle_level=None)
+
+    def feed(self, s, seq, cfg=None, t0=100.0):
+        cfg = cfg or {}
+        obs = {'level': None}
+        for i, (state, level) in enumerate(seq):
+            obs = dict(state=state, level=level)
+            bookkeep(s, obs, t0+i, cfg)
+            s['seen'] = state
+        return obs
+
+    def test_failed_level_replay_pauses(self):
+        s = self.fresh()
+        self.feed(s, [('in_instance', 5), ('battle', None), ('in_instance', 5)])
+        self.assertIn('did not advance', s.get('paused', ''))
+
+    def test_advanced_level_continues(self):
+        s = self.fresh()
+        self.feed(s, [('in_instance', 5), ('battle', None), ('in_instance', 6)])
+        self.assertIsNone(s.get('paused'))
+        self.assertIsNone(s['pre_battle_level'])
+
+    def test_level_none_after_battle_defers(self):
+        s = self.fresh()
+        self.feed(s, [('in_instance', 5), ('battle', None), ('in_instance', None)])
+        self.assertIsNone(s.get('paused'))
+        self.assertEqual(s['pre_battle_level'], 5)
+
+    def test_boss_chain_keeps_pre_level_until_instance(self):
+        # fight_menu must not clear the pending pre-battle level.
+        s = self.fresh()
+        self.feed(s, [('in_instance', 17), ('battle', None), ('fight_menu', 17),
+                      ('battle', None), ('in_instance', 17)])
+        self.assertIn('did not advance', s.get('paused', ''))
+
+    def test_boss_chain_advanced_level_not_paused(self):
+        s = self.fresh()
+        self.feed(s, [('in_instance', 17), ('battle', None), ('fight_menu', 18),
+                      ('battle', None), ('in_instance', 18)])
+        self.assertIsNone(s.get('paused'))
+
+    def test_cleared_without_battle_pauses(self):
+        s = self.fresh()
+        self.feed(s, [('normal', None), ('cleared', None)])
+        self.assertIn('cleared without', s.get('paused', ''))
+
+    def test_cleared_after_battle_ok(self):
+        s = self.fresh()
+        self.feed(s, [('battle', None), ('cleared', None)])
+        self.assertIsNone(s.get('paused'))
+        self.assertTrue(s['battle_seen'])
+
+    def test_stall_after_battle_pauses(self):
+        s = self.fresh()
+        self.feed(s, [('in_instance', 5), ('battle', None)], t0=0.0)
+        self.feed(s, [('in_instance', 5)], cfg={'advance_stall': 30}, t0=0.0)
+        # same level, but inst_since resets on re-entry; force the elapsed time
+        s['inst_since'] = -1000
+        bookkeep(s, dict(state='in_instance', level=5), 0.0, {'advance_stall': 30})
+        self.assertIn('no progress', s.get('paused', ''))
+
+
 class ValidateTests(unittest.TestCase):
     def base(self):
         return dict(device='pc1', calibrated=True, native_resolution=[1278, 956],
@@ -230,6 +305,24 @@ class ValidateTests(unittest.TestCase):
     def test_bad_stall(self):
         cfg = self.base()
         cfg['advance_stall'] = 5
+        with self.assertRaises(ValueError):
+            validate(cfg, 1)
+
+    def test_rounds_out_of_range(self):
+        cfg = self.base()
+        cfg['rounds'] = 0
+        with self.assertRaises(ValueError):
+            validate(cfg, 0)  # resolved from config when --rounds is absent
+        with self.assertRaises(ValueError):
+            validate(cfg, 11)
+
+    def test_box_extent_beyond_window(self):
+        cfg = self.base()
+        cfg['activity_button'] = [.9, 0, .3, .1]  # x+w = 1.2 > 1
+        with self.assertRaises(ValueError):
+            validate(cfg, 1)
+        cfg = self.base()
+        cfg['activity_list_scroll'] = [0, .95, .3, .2]  # y+h > 1
         with self.assertRaises(ValueError):
             validate(cfg, 1)
 

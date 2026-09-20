@@ -141,19 +141,22 @@ def find_row_button(items, entry, button, search_box, band=.08):
     band, to the right of the entry. Game list buttons sit slightly below
     their row text, so bbox overlap is unreliable — match by center distance
     instead (rows are ~.13 apart, so `band`=.08 cannot reach a neighbor row).
-    Returns (target, button_or_None). Used by ClickEntry."""
+    Both the entry and the button must lie inside `search_box`. Returns
+    (target, button_or_None). Used by ClickEntry."""
     target = find_text(items, entry, search_box)
     if target is None:
         return None, None
     tcy = target['y']+target['h']/2
     tcx = target['x']+target['w']/2
+    sx, sy, sw, sh = search_box
     best = None
     for it in items:
         if button not in it['text'] or it['score'] < DEFAULT_SCORE:
             continue
-        if it['x']+it['w']/2 <= tcx:
-            continue  # buttons sit to the right of the entry text
-        dy = abs(it['y']+it['h']/2-tcy)
+        bcx, bcy = it['x']+it['w']/2, it['y']+it['h']/2
+        if bcx <= tcx or not (sx <= bcx <= sx+sw and sy <= bcy <= sy+sh):
+            continue  # right of the entry, inside the list area
+        dy = abs(bcy-tcy)
         if dy <= band and (best is None or dy < best[0]):
             best = (dy, it)
     return target, (best[1] if best else None)

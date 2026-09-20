@@ -166,9 +166,46 @@ def recognize(img, wf, anchors=None, active=False):
     return obs, items
 
 
+def bookkeep(s, obs, now, cfg):
+    """Per-observation state bookkeeping (mutates s; no I/O). Carries the
+    pause-don't-guess anomalies: a battle that returns to the same level did
+    not advance (failed run → reconcile), and a cleared screen without any
+    observed battle is not a countable round. fight_menu keeps the pending
+    pre-battle level (boss chains fight through menus)."""
+    state = obs['state']
+    level = obs.get('level')
+    if state == 'battle':
+        if s.get('seen') == 'in_instance' and s.get('inst_level') is not None:
+            s['pre_battle_level'] = s['inst_level']
+        s['active'] = True
+        s['battle_seen'] = True
+        s['inst_since'] = None
+    elif state == 'cleared':
+        if not s.get('battle_seen'):
+            s['paused'] = 'cleared without an observed battle; reconcile'
+        s['inst_since'] = None
+    elif state == 'in_instance':
+        if s.get('pre_battle_level') is not None and level is not None:
+            if level <= s['pre_battle_level']:
+                s['paused'] = f'level did not advance after battle ({level}); reconcile'
+            s['pre_battle_level'] = None  # level None defers the decision one poll
+        if s.get('inst_since') is None or level != s.get('inst_level'):
+            s.update(inst_since=now, inst_level=level)
+        if (s.get('active') and s.get('battle_seen') and level is not None
+                and level == s.get('inst_level')
+                and now-s['inst_since'] > cfg.get('advance_stall', 150)):
+            s['paused'] = f'no progress after battle (level {level}); reconcile'
+    else:
+        s['inst_since'] = None
+        if state != 'fight_menu':
+            s['pre_battle_level'] = None
+
+
 def validate(cfg, rounds):
     if not cfg.get('calibrated'):
         raise ValueError('Requires calibrated configuration')
+    if not 1 <= rounds <= 10:
+        raise ValueError('rounds must be 1..10 (resolved from --rounds or config)')
     base_resolution = cfg.get('native_resolution')
     if (not isinstance(base_resolution, list) or len(base_resolution) != 2
             or any(type(v) is not int or v < 1 for v in base_resolution)):
@@ -211,7 +248,8 @@ def validate(cfg, rounds):
         box = cfg.get(key)
         if (not isinstance(box, list) or len(box) != 4
                 or any(not isinstance(v, (int, float)) or not 0 <= v <= 1 for v in box)
-                or box[2] <= 0 or box[3] <= 0):
+                or box[2] <= 0 or box[3] <= 0
+                or box[0]+box[2] > 1 or box[1]+box[3] > 1):
             raise ValueError('Invalid '+key)
     if type(cfg.get('advance_delay', 5)) is not int or cfg.get('advance_delay', 5) < 0:
         raise ValueError('Invalid advance_delay')
@@ -305,21 +343,6 @@ async def run(args):
             raise RuntimeError('Crop resized or clipped')
         return img
 
-    async def humanized_click(win, s, target_id, box, button='left', fresh=False):
-        """Humanized landing pixel inside normalized box, translated to
-        absolute screen coordinates by the window rect; dead-center and a
-        short fixed delay when humanize is off (offline tests)."""
-        x0, y0, w, h = win['rect']
-        if planner is None:
-            x, y = round((box[0]+box[2]/2)*w), round((box[1]+box[3]/2)*h)
-            delay = .05
-        else:
-            x, y = planner.point(f'{win["name"]}:{target_id}', box, (w, h))
-            delay = planner.delay(fresh_screen=fresh)
-        if delay:
-            await asyncio.sleep(min(delay, 1.0))
-        await call('click', win_device(win), x=x0+x, y=y0+y, humanize=humanize, button=button)
-
     async def humanized_scroll(win, box):
         anchor = (box[0]+box[2]/2, box[1]+box[3]/2)
         x0, y0, w, h = win['rect']
@@ -331,9 +354,11 @@ async def run(args):
             await asyncio.sleep(min(pause, .5))
 
     async def execute_node(node, win, s, obs):
-        """Recheck invariant: capture a fresh frame right before any input
-        and locate the target on it — the loop's frame may be seconds old
-        after the other windows' recognition."""
+        """Safety ordering: the human-like hesitation happens BEFORE the
+        pre-click recheck, so the recheck frame is as close to the input as
+        possible — never sleep between the recheck and the click."""
+        if planner is not None:
+            await asyncio.sleep(min(planner.delay(fresh_screen=s.get('fresh', False)), 1.0))
         check_img = await capture(win)
         check, check_items = await asyncio.to_thread(recognize, check_img, wf)
         if check['state'] != obs['state']:
@@ -366,11 +391,16 @@ async def run(args):
                 return None
         else:  # Nop / unknown: nothing to send
             return None
+        x0, y0, w, h = win['rect']
+        if planner is None:
+            x, y = round((box[0]+box[2]/2)*w), round((box[1]+box[3]/2)*h)
+        else:
+            x, y = planner.point(f'{win["name"]}:{node.id}', box, (w, h))
         s.update(pending=node.id, sent=time.monotonic())
         before = shot_name(win['name'], node.id+'-before')
         check_img.save(args.output/before)
         event(window=win['name'], intent=node.id, before=before, fresh=s.get('fresh'))
-        await humanized_click(win, s, node.id, box, button=button, fresh=s.get('fresh', False))
+        await call('click', win_device(win), x=x0+x, y=y0+y, humanize=humanize, button=button)
         event(window=win['name'], sent=node.id)
         return node.id
 
@@ -404,25 +434,10 @@ async def run(args):
                     s['observation'] = dict(obs)
                     s['level'] = obs.get('level')
 
-                    # ---- battle bookkeeping (anchors learn; stall tracking) ----
-                    if obs['state'] == 'battle':
-                        if obs['source'] != 'local_battle_anchors':
-                            anchors[i].learn(img)
-                        s['active'] = True
-                        s['battle_seen'] = True
-                        s['inst_since'] = None
-                    elif obs['state'] in ('fight_menu', 'cleared'):
-                        s['inst_since'] = None
-                    elif obs['state'] == 'in_instance':
-                        level = obs.get('level')
-                        if s.get('inst_since') is None or level != s.get('inst_level'):
-                            s.update(inst_since=now, inst_level=level)
-                        if (s.get('active') and s.get('battle_seen')
-                                and level is not None and level == s.get('inst_level')
-                                and now-s['inst_since'] > cfg.get('advance_stall', 150)):
-                            s['paused'] = f'no progress after battle (level {level}); reconcile'
-                    else:
-                        s['inst_since'] = None
+                    # ---- battle bookkeeping (anchors learn; stall/failure tracking) ----
+                    if obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
+                        anchors[i].learn(img)
+                    bookkeep(s, obs, now, cfg)
 
                     # ---- pending confirmation (never blind-retry an input) ----
                     confirmed = None

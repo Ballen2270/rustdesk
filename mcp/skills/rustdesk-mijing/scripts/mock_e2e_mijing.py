@@ -82,7 +82,7 @@ def main():
     timeline = read_jsonl('timeline.jsonl')
     check(len(timeline) > 40, 'timeline has per-loop rows', str(len(timeline)))
     battle_loops = [e for e in timeline if e.get('state') == 'battle']
-    check(len(battle_loops) >= 10, 'battle states observed', str(len(battle_loops)))
+    check(len(battle_loops) >= 6, 'battle states observed', str(len(battle_loops)))
     levels = {e.get('level') for e in timeline if e.get('window') == 'left'}
     check(1 in levels or 18 in levels or 24 in levels or 25 in levels,
           'level numbers parsed from OCR', str(sorted(l for l in levels if l is not None))[:120])
