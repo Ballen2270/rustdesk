@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>剑会观察台 · Jianhui Console</title>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#101722; --panel2:#0d131c; --line:#1c2836; --line2:#243447;
+  --text:#c9d7e2; --dim:#5d7186; --faint:#3b4d61;
+  --amber:#ffb454; --red:#ff5d5d; --green:#35d07f; --violet:#a78bfa; --blue:#5aa9ff; --gold:#ffcf5c;
+  --room:#5aa9ff; --ready:#35d07f; --matching:#a78bfa; --battle:#ff5d5d; --result:#ffcf5c;
+  --kickwarn:#ffb454; --panelstate:#ff9151; --unknown:#55677a;
+  --disp:"Avenir Next Condensed","Futura","Helvetica Neue","PingFang SC",sans-serif;
+  --body:"PingFang SC","Helvetica Neue","Noto Sans SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scrollbar-color:#2a3b4f var(--bg)}
+body{
+  background:var(--bg);color:var(--text);font-family:var(--body);font-size:14px;line-height:1.55;
+  background-image:
+    linear-gradient(rgba(110,150,195,.045) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(110,150,195,.045) 1px,transparent 1px);
+  background-size:36px 36px;
+  min-height:100vh;
+}
+::selection{background:rgba(255,180,84,.25)}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:#26374a;border-radius:5px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ---------- header ---------- */
+header{
+  position:sticky;top:0;z-index:20;
+  display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:14px 22px;
+  background:rgba(11,15,20,.92);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);
+}
+header::after{
+  content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  background:linear-gradient(90deg,var(--amber),rgba(167,139,250,.55) 40%,transparent 80%);
+}
+.brand{display:flex;align-items:center;gap:13px}
+.mark{
+  width:42px;height:42px;display:grid;place-items:center;flex:none;
+  font-family:var(--disp);font-size:23px;font-weight:600;color:var(--amber);
+  border:1px solid rgba(255,180,84,.55);border-radius:9px;
+  background:
+    linear-gradient(135deg,rgba(255,180,84,.12),transparent 55%),
+    repeating-linear-gradient(0deg,transparent 0 5px,rgba(255,180,84,.07) 5px 6px);
+  text-shadow:0 0 14px rgba(255,180,84,.4);
+}
+.brand h1{font-family:var(--disp);font-size:19px;font-weight:600;letter-spacing:.14em}
+.brand .sub{font-family:var(--mono);font-size:10px;letter-spacing:.32em;color:var(--dim);margin-top:1px}
+.meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1}
+.chip{
+  display:inline-flex;align-items:center;gap:7px;padding:4px 11px;
+  border:1px solid var(--line2);border-radius:999px;background:var(--panel2);
+  font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:nowrap;
+}
+.chip b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 8px rgba(53,208,127,.7);animation:pulse 1.6s infinite}
+.dot.off{background:var(--red)}
+.dot.warn{background:var(--gold)}
+@keyframes pulse{50%{opacity:.45}}
+.actions{display:flex;gap:9px}
+button{
+  font-family:var(--body);font-size:12.5px;color:var(--text);cursor:pointer;
+  padding:7px 15px;border-radius:8px;border:1px solid var(--line2);
+  background:linear-gradient(180deg,#151f2c,#111925);transition:.15s;
+}
+button:hover{border-color:var(--amber);color:var(--amber)}
+button.danger{border-color:rgba(255,93,93,.5);color:var(--red)}
+button.danger:hover{background:rgba(255,93,93,.12)}
+button.danger.armed{background:var(--red);border-color:var(--red);color:#fff}
+button:disabled{opacity:.55;cursor:default}
+
+/* ---------- layout ---------- */
+main{max-width:1560px;margin:0 auto;padding:20px 22px 8px;display:grid;gap:18px}
+.panel{
+  background:linear-gradient(180deg,var(--panel),var(--panel2));
+  border:1px solid var(--line);border-radius:13px;
+  box-shadow:0 12px 34px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.03);
+  overflow:hidden;
+}
+.panel-head{
+  display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+  padding:11px 16px;border-bottom:1px solid var(--line);
+}
+.panel-head h2{font-family:var(--disp);font-size:13.5px;font-weight:600;letter-spacing:.2em;color:var(--text)}
+.panel-head h2::before{content:"▸ ";color:var(--amber)}
+.hint{font-size:11.5px;color:var(--faint)}
+.controls{margin-left:auto;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+select,input[type=checkbox]+label{
+  font-size:12px;color:var(--dim);background:var(--panel2);
+  border:1px solid var(--line2);border-radius:7px;padding:3px 8px;
+}
+select{color:var(--text);font-family:var(--body)}
+
+/* ---------- window cards ---------- */
+.cards{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr))}
+.card{display:flex;flex-direction:column}
+.card>header{position:static;display:flex;align-items:center;gap:10px;padding:12px 16px;background:none;border-bottom:1px solid var(--line);backdrop-filter:none}
+.card>header::after{display:none}
+.win-tag{
+  font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--dim);
+  border:1px solid var(--line2);padding:2px 9px;border-radius:6px;
+}
+.badge{
+  font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.06em;
+  padding:2px 10px;border-radius:999px;border:1px solid;
+}
+.badge::before{content:"● ";font-size:8px;vertical-align:1px}
+.st-room{color:var(--room);border-color:rgba(90,169,255,.4);background:rgba(90,169,255,.08)}
+.st-ready{color:var(--ready);border-color:rgba(53,208,127,.4);background:rgba(53,208,127,.08)}
+.st-matching{color:var(--matching);border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.08)}
+.st-battle{color:var(--battle);border-color:rgba(255,93,93,.45);background:rgba(255,93,93,.09);animation:pulse 1.4s infinite}
+.st-result{color:var(--result);border-color:rgba(255,207,92,.4);background:rgba(255,207,92,.08)}
+.st-kickwarn{color:var(--kickwarn);border-color:rgba(255,180,84,.5);background:rgba(255,180,84,.1);animation:pulse 1.2s infinite}
+.st-panel{color:var(--panelstate);border-color:rgba(255,145,81,.4);background:rgba(255,145,81,.08)}
+.st-unknown{color:var(--unknown);border-color:rgba(85,103,122,.5);background:rgba(85,103,122,.1)}
+.card .count{margin-left:auto;font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
+.card .count b{color:var(--amber)}
+.shot{position:relative;background:#05080c;min-height:180px;display:grid;place-items:center;border-bottom:1px solid var(--line)}
+.shot img{display:block;width:100%;max-height:330px;object-fit:contain}
+.shot .empty{color:var(--faint);font-family:var(--mono);font-size:12px;letter-spacing:.3em}
+.shot .live{
+  position:absolute;top:8px;left:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.22em;
+  color:var(--green);background:rgba(5,8,12,.72);border:1px solid rgba(53,208,127,.35);
+  padding:2px 8px;border-radius:5px;display:flex;gap:6px;align-items:center;
+}
+.progress{height:4px;background:#0a1017}
+.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--amber),var(--gold));transition:width .5s}
+.card-body{padding:12px 16px 14px;display:grid;gap:9px}
+.slots{display:flex;gap:7px;align-items:center}
+.slots .lbl{font-size:11.5px;color:var(--faint);margin-right:3px}
+.slot{width:22px;height:9px;border-radius:4px;background:#16202c;border:1px solid var(--line2)}
+.slot.on{background:var(--green);border-color:var(--green);box-shadow:0 0 7px rgba(53,208,127,.5)}
+.model{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px 16px;
+  padding:10px 12px;border:1px dashed var(--line2);border-radius:9px;background:rgba(13,19,28,.6)}
+.model .k{font-size:10.5px;color:var(--faint);letter-spacing:.14em;margin-bottom:2px}
+.model .v{font-family:var(--mono);font-size:12.5px;color:var(--text);font-variant-numeric:tabular-nums}
+.v .u{color:var(--faint);font-size:10.5px}
+.src-roi_ocr{color:var(--green)} .src-full_ocr_fallback{color:var(--gold)} .src-local_battle_anchors{color:var(--violet)}
+.banner{padding:8px 12px;border-radius:8px;font-size:12.5px;display:flex;gap:9px;align-items:baseline}
+.banner .t{font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;flex:none}
+.banner.warn{background:rgba(255,207,92,.09);border:1px solid rgba(255,207,92,.35);color:var(--gold)}
+.banner.hold{background:rgba(255,180,84,.08);border:1px solid rgba(255,180,84,.35);color:var(--amber)}
+.banner.stop{background:rgba(255,93,93,.1);border:1px solid rgba(255,93,93,.4);color:var(--red)}
+
+/* ---------- swimlanes ---------- */
+.lane-row{display:flex;align-items:center;gap:12px;padding:9px 16px;border-bottom:1px solid var(--line)}
+.lane-row:last-child{border-bottom:none}
+.lane-row .win-tag{flex:none}
+.lane{display:flex;gap:1px;flex:1;overflow-x:auto;scrollbar-width:thin;padding:2px 0}
+.cell{width:5px;height:22px;border-radius:1.5px;flex:none;cursor:default}
+.cell.minor{opacity:.82}
+.c-room{background:var(--room)} .c-ready{background:var(--ready)} .c-matching{background:var(--matching)}
+.c-battle{background:var(--battle)} .c-result{background:var(--result)} .c-panel{background:var(--panelstate)}
+.c-kickwarn{background:var(--kickwarn)}
+.c-unknown{background:var(--unknown)}
+.lane-time{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);width:52px;text-align:right}
+
+/* ---------- split: timeline + log ---------- */
+.split{display:grid;gap:18px}
+@media(min-width:1020px){.split{grid-template-columns:minmax(0,1fr) minmax(300px,380px)}}
+.table-wrap{overflow:auto;max-height:420px}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums}
+thead th{
+  position:sticky;top:0;background:#0e151f;color:var(--faint);font-weight:500;text-align:left;
+  padding:7px 12px;border-bottom:1px solid var(--line2);letter-spacing:.08em;font-size:10.5px;white-space:nowrap;
+}
+tbody td{padding:5px 12px;border-bottom:1px solid rgba(28,40,54,.55);white-space:nowrap;color:var(--dim)}
+tbody tr:hover td{background:rgba(90,169,255,.045);color:var(--text)}
+tbody tr.key td{color:var(--text)}
+td .s{display:inline-flex;align-items:center;gap:5px}
+td .s::before{content:"";width:7px;height:7px;border-radius:2px;background:currentColor}
+tbody tr[data-win=left] td:first-child{box-shadow:inset 2px 0 0 rgba(90,169,255,.55)}
+tbody tr[data-win=right] td:first-child{box-shadow:inset 2px 0 0 rgba(255,145,81,.55)}
+.act{display:inline-block;padding:1px 8px;border-radius:5px;font-size:10.5px;border:1px solid}
+.act-match{color:var(--amber);border-color:rgba(255,180,84,.5)}
+.act-close{color:var(--panelstate);border-color:rgba(255,145,81,.5)}
+.ok{color:var(--green);font-size:10.5px}
+.warnmark{color:var(--gold)} .stopmark{color:var(--red)}
+body.key-only tr.minor{display:none}
+body.win-left tr[data-win=right]{display:none}
+body.win-right tr[data-win=left]{display:none}
+
+.log-wrap{height:420px;overflow:auto;padding:10px 14px;font-family:var(--mono);font-size:11px;line-height:1.75}
+.log-line{white-space:pre-wrap;word-break:break-all;color:var(--dim)}
+.log-line .ts{color:var(--faint)}
+.log-line .w{color:var(--blue)}
+.lg-intent{color:var(--amber)} .lg-sent{color:var(--green)} .lg-confirmed{color:var(--green)}
+.lg-error{color:var(--red)} .lg-abort{color:var(--panelstate)} .lg-obs{color:var(--dim)} .lg-stop{color:var(--red)}
+.log-line .xn{color:var(--amber);font-weight:600;margin-left:8px}
+body.log-key-only .lg-obs{display:none}
+
+/* ---------- gallery ---------- */
+.strips{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));padding:14px 16px}
+figure{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#05080c;cursor:zoom-in;transition:border-color .15s}
+figure:hover{border-color:var(--amber)}
+figure img{display:block;width:100%;height:118px;object-fit:cover;object-position:top;background:#0a0f15}
+figcaption{display:flex;gap:7px;align-items:center;padding:6px 10px;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+figcaption .tag{border:1px solid var(--line2);border-radius:4px;padding:0 6px}
+figcaption .tag.t-before{color:var(--amber);border-color:rgba(255,180,84,.45)}
+figcaption .tag.t-after{color:var(--green);border-color:rgba(53,208,127,.45)}
+figcaption .tag.t-evidence{color:var(--blue);border-color:rgba(90,169,255,.45)}
+
+/* ---------- settings panel ---------- */
+#settings{
+  position:fixed;top:0;right:0;bottom:0;z-index:40;width:min(340px,92vw);
+  background:linear-gradient(180deg,#111a26,#0c121b);
+  border-left:1px solid var(--line2);box-shadow:-18px 0 50px rgba(0,0,0,.5);
+  transform:translateX(0);transition:transform .22s ease;display:flex;flex-direction:column;
+}
+#settings.hidden{transform:translateX(105%)}
+.set-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px 12px;border-bottom:1px solid var(--line)}
+.set-head h2{font-family:var(--disp);font-size:15px;letter-spacing:.18em}
+.set-head button{padding:2px 12px;font-size:16px}
+.set-body{padding:14px 18px;display:grid;gap:13px;align-content:start;overflow:auto}
+.set-body label{display:grid;gap:5px;font-size:12px;color:var(--dim)}
+.set-body select{width:100%;padding:6px 8px;background:var(--panel2);color:var(--text);
+  border:1px solid var(--line2);border-radius:7px;font-family:var(--body)}
+.set-sep{height:1px;background:var(--line);margin:4px 0}
+
+/* ---------- lightbox / footer ---------- */
+#lightbox{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(5,8,12,.9);
+  cursor:zoom-out;padding:30px}
+#lightbox img{max-width:94vw;max-height:86vh;border:1px solid var(--line2);border-radius:10px;background:#000}
+#lightbox .cap{position:absolute;bottom:22px;left:0;right:0;text-align:center;font-family:var(--mono);
+  font-size:12px;color:var(--dim)}
+.hidden{display:none!important}
+footer{max-width:1560px;margin:0 auto;padding:6px 22px 26px;color:var(--faint);
+  font-family:var(--mono);font-size:10.5px;display:flex;gap:16px;flex-wrap:wrap}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media(max-width:560px){
+  header{gap:10px;padding:12px 14px}main{padding:14px 12px}
+  .meta{order:3;width:100%}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="mark">剑</div>
+    <div><h1>剑会观察台</h1><div class="sub">JIANHUI CONSOLE</div></div>
+  </div>
+  <div class="meta" id="meta"><span class="chip"><span class="dot" id="connDot"></span><span id="connText">连接中</span></span></div>
+  <div class="actions">
+    <button id="pauseBtn">暂停刷新</button>
+    <button id="settingsBtn" title="设置">⚙ 设置</button>
+    <button id="stopBtn" class="danger">停止运行</button>
+  </div>
+</header>
+
+<main>
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>状态泳道</h2><div class="hint">每格一次观察 · 新的追加在右侧 · hover 看详情</div>
+      <div class="controls"><span class="hint" id="laneInfo"></span></div>
+    </div>
+    <div id="lanes"></div>
+  </section>
+
+  <div class="split">
+    <section class="panel">
+      <div class="panel-head"><h2>操作时序</h2>
+        <div class="controls">
+          <select id="winFilter">
+            <option value="">全部窗口</option><option value="left">left</option><option value="right">right</option>
+          </select>
+          <input type="checkbox" id="keyOnly"><label for="keyOnly">只看动作/异常</label>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>窗</th><th>状态</th><th>识别</th><th>准备</th><th>场次</th><th>动作</th><th>耗时</th><th>锚点</th></tr></thead>
+          <tbody id="tlBody"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>事件日志</h2><div class="hint" id="evCount"></div>
+        <div class="controls">
+          <input type="checkbox" id="logKeyOnly"><label for="logKeyOnly">只看关键</label>
+          <button id="logClearBtn" title="只清空本视图,磁盘上的 events.jsonl 不受影响">清空视图</button>
+        </div>
+      </div>
+      <div class="log-wrap" id="logPane"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>截图证据</h2><div class="hint">状态变化帧 · 操作前后对照 · 点击放大</div>
+      <div class="controls">
+        <span class="hint" id="cleanInfo"></span>
+        <button id="cleanBtn" class="danger">清理历史帧</button>
+      </div>
+    </div>
+    <div class="strips" id="gallery"></div>
+  </section>
+</main>
+
+<footer><span id="runDir">—</span><span>只读观察台 · STOP 等价于文档规定的人工停止 · 不直接触碰设备</span></footer>
+
+<div id="lightbox" class="hidden"><img id="lbImg" alt=""><div class="cap" id="lbCap"></div></div>
+
+<aside id="settings" class="hidden" aria-label="设置">
+  <div class="set-head"><h2>设置</h2><button id="setClose" title="关闭">×</button></div>
+  <div class="set-body">
+    <label>自动刷新
+      <select id="setPoll">
+        <option value="0">暂停</option><option value="500">0.5 秒</option>
+        <option value="1000">1 秒</option><option value="2000">2 秒</option>
+        <option value="5000">5 秒</option>
+      </select></label>
+    <label>泳道容量(每窗保留格数)
+      <select id="setLane"><option value="360">360</option><option value="720">720</option>
+        <option value="1440">1440</option></select></label>
+    <label>时序表行数
+      <select id="setTl"><option value="250">250</option><option value="500">500</option>
+        <option value="1000">1000</option></select></label>
+    <label>日志行数
+      <select id="setLog"><option value="400">400</option><option value="800">800</option>
+        <option value="1600">1600</option></select></label>
+    <div class="set-sep"></div>
+    <label>自动清理(janitor,写入运行目录 GC.json)
+      <select id="setGc"><option value="0">关闭</option><option value="1">开启</option></select></label>
+    <label>关键帧流 frames/ 保留
+      <select id="setGcFrames"><option value="1">1 小时</option><option value="6">6 小时</option>
+        <option value="24">24 小时</option><option value="168">7 天</option></select></label>
+    <label>状态变化证据帧保留
+      <select id="setGcEvidence"><option value="1">1 小时</option><option value="2">2 小时</option>
+        <option value="6">6 小时</option><option value="24">24 小时</option></select></label>
+    <label>「清理历史帧」按钮保留期
+      <select id="setCleanKeep"><option value="0">全部清理</option><option value="1">保留最近 1 小时</option>
+        <option value="6">保留最近 6 小时</option><option value="24">保留最近 24 小时</option></select></label>
+    <div class="hint">UI 偏好存本浏览器;自动清理策略存运行目录 GC.json(无此文件 = 从不自动删)。操作前后帧与 latest 永不清理;磁盘上的 events/timeline 日志永不自动清理。</div>
+  </div>
+</aside>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const hhmmss = t => { const d = new Date(t*1000);
+  return [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':'); };
+const SRC_SHORT = {roi_ocr:'ROI', full_ocr_fallback:'FULL', local_battle_anchors:'ANCHOR'};
+const SRC_TITLE = {roi_ocr:'分区OCR', full_ocr_fallback:'全图OCR兜底', local_battle_anchors:'战斗锚点模板'};
+
+const S = {
+  tl:0, ev:0, paused:false, names:[], cards:{}, lanes:{}, stats:{}, latency:{},
+  firstTs:null, seenImg:new Set(), stopArmed:false, stopTimer:null, logPinned:true,
+};
+const CFG_DEFAULT = {pollMs:1000, laneCap:720, tlRows:500, logLines:800, cleanKeepH:0};
+S.cfg = Object.assign({}, CFG_DEFAULT, (()=>{ try{return JSON.parse(localStorage.getItem('jianhui-console')||'{}')}catch(e){return {}} })());
+const saveCfg = ()=>localStorage.setItem('jianhui-console', JSON.stringify(S.cfg));
+
+/* ---------- meta header ---------- */
+function chip(id,label,val){ return `<span class="chip" ${id?`id="${id}"`:''}>${label} <b>${val}</b></span>`; }
+function renderMeta(d){
+  const st = d.state; const parts = [];
+  parts.push(chip('mMode','模式', st?st.mode:'—'));
+  parts.push(chip('mStatus','状态', st?st.status:'—'));
+  if(st && st.windows) parts.push(chip('mCount','场次', st.windows.map(w=>w.count).join(' / ')+(st.games!=null?` / ${st.games}`:'')));
+  if(st && st.loop_seconds!=null) parts.push(chip('mLoop','循环', st.loop_seconds+'s'));
+  if(S.firstTs) parts.push(chip('mElapsed','已运行', fmtElapsed((Date.now()/1000)-S.firstTs)));
+  if(d.stopped) parts.push(chip('','STOP','文件存在'));
+  if(st && st.error) parts.push(chip('','错误', st.error.slice(0,60)));
+  parts.push(chip('mWins','窗口', S.names.join('+')||'—'));
+  $('#meta').innerHTML =
+    `<span class="chip"><span class="dot" id="connDot"></span><span id="connText">已连接</span></span>` + parts.join('');
+  const dot = $('#connDot'); dot.className = 'dot '+(st && st.status==='running' ? (d.stopped?'warn':'on') : '');
+  if(st && st.status==='running' && d.stopped) $('#connText').textContent='等待停止';
+}
+
+function fmtElapsed(sec){
+  sec = Math.max(0, Math.floor(sec));
+  const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60), s=sec%60;
+  return (h?h+'h ':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+
+/* ---------- window cards ---------- */
+function ensureCards(d){
+  const st = d.state; if(!st) return;
+  const cfgNames = (st.config&&st.config.windows||[]).map(w=>w.name);
+  if(cfgNames.length) S.names = cfgNames;
+  else if(!S.names.length){
+    S.names = Object.keys(d.recognition).length?Object.keys(d.recognition):['left','right'];
+  }
+  for(const name of S.names){
+    if(S.cards[name]) continue;
+    const el = document.createElement('article');
+    el.className = 'panel card';
+    el.innerHTML = `
+      <header><span class="win-tag">${name}</span><span class="badge st-unknown" data-f="badge">unknown</span>
+        <span class="count" data-f="count"><b>0</b>/—</span></header>
+      <div class="shot"><div class="empty" data-f="empty">等待画面…</div>
+        <img alt="" class="hidden" data-f="img"><div class="live hidden" data-f="live"><span class="dot on"></span>LIVE</div></div>
+      <div class="progress"><i data-f="bar" style="width:0%"></i></div>
+      <div class="card-body">
+        <div class="slots"><span class="lbl">准备槽</span>
+          ${[0,1,2,3].map(i=>`<span class="slot" data-slot="${i}"></span>`).join('')}</div>
+        <div class="model">
+          <div><div class="k">识别来源</div><div class="v" data-f="src">—</div></div>
+          <div><div class="k">识别耗时</div><div class="v" data-f="lat">—</div></div>
+          <div><div class="k">耗时 P50 / P95</div><div class="v" data-f="pct">—</div></div>
+          <div><div class="k">战斗锚点模板</div><div class="v" data-f="anchors">— / 8</div></div>
+        </div>
+        <div data-f="banners" style="display:grid;gap:7px"></div>
+      </div>`;
+    $('#cards').appendChild(el);
+    S.cards[name] = el;
+    S.lanes[name] = null; S.latency[name] = [];
+  }
+}
+
+function pct(arr,p){ if(!arr.length) return null; const a=[...arr].sort((x,y)=>x-y);
+  return a[Math.min(a.length-1,Math.floor(a.length*p))]; }
+
+function renderCards(d){
+  const st = d.state; if(!st) return;
+  S.names.forEach((name,i)=>{
+    const el = S.cards[name]; if(!el) return;
+    const w = st.windows && st.windows[i] || {};
+    const rec = d.recognition[name];
+    const obs = (rec && rec.observation) || w.observation || {};
+    const f = sel => el.querySelector(`[data-f="${sel}"]`);
+    f('badge').className = 'badge st-'+(obs.state||'unknown');
+    f('badge').textContent = obs.state||'unknown';
+    f('count').innerHTML = `<b>${w.count??'—'}</b>/${st.games??'—'}`;
+    f('bar').style.width = (st.games?Math.min(100,100*(w.count||0)/st.games):0)+'%';
+    const rd = obs.ready||[false,false,false,false];
+    el.querySelectorAll('.slot').forEach((s,j)=>s.classList.toggle('on',!!rd[j]));
+    f('src').innerHTML = obs.source?`<span class="src-${obs.source}">${SRC_SHORT[obs.source]||obs.source}</span> <span class="u">${SRC_TITLE[obs.source]||''}</span>`:'—';
+    if(obs.recognition_seconds!=null) f('lat').textContent = obs.recognition_seconds.toFixed(2)+' s';
+    const lat = S.latency[name];
+    const p50 = pct(lat,.5), p95 = pct(lat,.95);
+    f('pct').textContent = lat.length?`${p50.toFixed(2)} / ${p95.toFixed(2)} s`:'—';
+    const anchors = el.anchorsCache!=null?el.anchorsCache:(w.anchors!=null?w.anchors:null);
+    if(anchors!=null){f('anchors').textContent = anchors+' / 8'; el.anchorsCache=anchors;}
+    const banners = [];
+    if(w.paused) banners.push(`<div class="banner stop"><span class="t">已暂停</span><span>${w.paused}</span></div>`);
+    else if(w.pending) banners.push(`<div class="banner hold"><span class="t">待确认</span><span>${w.pending} — 已发送，等待状态确认</span></div>`);
+    if(w.warning) banners.push(`<div class="banner warn"><span class="t">注意</span><span>${w.warning}</span></div>`);
+    if(rec && rec.warning && !w.warning) banners.push(`<div class="banner warn"><span class="t">注意</span><span>${rec.warning}</span></div>`);
+    if(w.active) banners.push(`<div class="banner hold"><span class="t">战斗</span><span>对局进行中，胜负结果出现后计一场</span></div>`);
+    f('banners').innerHTML = banners.join('');
+    if(!S.paused) refreshLive(name, f('img'), f('empty'), f('live'));
+  });
+}
+
+function refreshLive(name, img, empty, live){
+  const probe = new Image();
+  probe.onload = ()=>{ img.src = probe.src; img.classList.remove('hidden'); live.classList.remove('hidden'); empty.classList.add('hidden'); };
+  probe.src = `/img/latest-${name}.png?t=${Date.now()}`;
+}
+
+/* ---------- swimlanes ---------- */
+function ensureLane(name){
+  if(S.lanes[name] && document.contains(S.lanes[name].track)) return S.lanes[name];
+  const row = document.createElement('div'); row.className='lane-row';
+  row.innerHTML = `<span class="win-tag">${name}</span><div class="lane"></div><span class="lane-time"></span>`;
+  $('#lanes').appendChild(row);
+  const track = row.querySelector('.lane');
+  const lane = {track, time:row.querySelector('.lane-time'), n:0};
+  track.addEventListener('scroll',()=>{lane.pinned = track.scrollLeft + track.clientWidth >= track.scrollWidth - 30;},{passive:true});
+  lane.pinned = true;
+  S.lanes[name] = lane;
+  return lane;
+}
+function appendLanes(entries){
+  for(const e of entries){
+    if(!e.window) continue;
+    const lane = ensureLane(e.window);
+    const cell = document.createElement('i');
+    cell.className = `cell c-${e.state||'unknown'}`;
+    cell.title = `#${e.loop} ${hhmmss(e.time)} ${e.state||'?'} · ${SRC_SHORT[e.source]||e.source||''} · ${e.count??'?'}场`+(e.action?` · ${e.action}`:'');
+    lane.track.appendChild(cell);
+    if(++lane.n > S.cfg.laneCap) lane.track.firstElementChild.remove();
+    if(lane.pinned) lane.track.scrollLeft = lane.track.scrollWidth;
+    lane.time.textContent = hhmmss(e.time);
+  }
+  const total = S.tl;
+  $('#laneInfo').textContent = total?`共 ${total} 次观察`:'';
+}
+
+/* ---------- timeline table ---------- */
+function tlRow(e){
+  const tr = document.createElement('tr');
+  tr.dataset.win = e.window||'';
+  const key = !!(e.action||e.confirmed||e.warning||e.paused);
+  tr.className = key?'key':'minor';
+  const rd = (e.ready||[]).map(r=>r?'●':'○').join(' ');
+  let act = '';
+  if(e.action) act += `<span class="act act-${e.action}">${e.action}</span> `;
+  if(e.confirmed) act += `<span class="ok">✓已确认</span>`;
+  if(e.paused) act += `<span class="stopmark">暂停</span>`;
+  else if(e.warning) act += `<span class="warnmark">⚠</span>`;
+  tr.innerHTML = `<td>${hhmmss(e.time)}</td><td>${e.window||''}</td>
+    <td><span class="s" style="color:var(--${e.state||'unknown'})">${e.state||'?'}</span></td>
+    <td>${SRC_SHORT[e.source]||e.source||''}</td><td>${rd}</td><td>${e.count??''}</td>
+    <td>${act}</td><td>${e.recognition_seconds!=null?e.recognition_seconds.toFixed(2):''}</td><td>${e.anchors!=null?e.anchors:''}</td>`;
+  return tr;
+}
+function prependRows(entries){
+  const body = $('#tlBody');
+  for(let i=entries.length-1;i>=0;i--){
+    const e = entries[i]; if(!e.window) continue;
+    body.prepend(tlRow(e));
+    if(e.window in S.latency && e.recognition_seconds!=null){
+      S.latency[e.window].push(e.recognition_seconds);
+      if(S.latency[e.window].length>600) S.latency[e.window].shift();
+    }
+    if(e.anchors!=null && S.cards[e.window]) S.cards[e.window].anchorsCache = e.anchors;
+  }
+  while(body.children.length>S.cfg.tlRows) body.lastElementChild.remove();
+}
+
+/* ---------- log pane ---------- */
+function classifyEvent(e){
+  if(e.error) return ['error','错误'];
+  if(e.action_aborted) return ['abort','重核中止'];
+  if(e.confirmed) return ['confirmed','已确认'];
+  if(e.sent) return ['sent','已发送'];
+  if(e.intent) return ['intent','意图'];
+  if(e.observation) return ['obs','状态'];
+  return ['obs','事件'];
+}
+function appendLog(events){
+  const pane = $('#logPane');
+  for(const e of events){
+    const [cls,label] = classifyEvent(e);
+    const w = e.window?`<span class="w">[${e.window}]</span> `:'';
+    let detail = '';
+    if(e.error) detail = e.error;
+    else if(e.action_aborted) detail = `${e.action_aborted} — ${e.reason||''}`;
+    else if(e.confirmed) detail = `${e.confirmed} → ${e.after||''}`;
+    else if(e.sent) detail = e.sent;
+    else if(e.intent) detail = `${e.intent} → ${e.before||''}`;
+    else if(e.observation) detail = `${e.observation.state||'?'} count=${e.count??'?'} ${e.evidence||''}`;
+    else detail = JSON.stringify(e).slice(0,160);
+    const gkey = `${cls}|${e.window||''}|${label}|${detail.slice(0,80)}`;
+    const last = pane.lastElementChild;
+    if(last && last.dataset.g === gkey){
+      // repeated identical entry: fold into the previous line with ×N
+      last.dataset.n = String(Number(last.dataset.n||1)+1);
+      const xn = last.querySelector('.xn');
+      if(xn) xn.textContent = ` ×${last.dataset.n}`;
+      continue;
+    }
+    const line = document.createElement('div');
+    line.className = `log-line lg-${cls}`;
+    line.dataset.g = gkey; line.dataset.n = '1';
+    line.innerHTML = `<span class="ts">${hhmmss(e.time)}</span> ${w}${label} ${detail}<span class="xn"></span>`;
+    pane.appendChild(line);
+  }
+  while(pane.children.length>S.cfg.logLines) pane.firstElementChild.remove();
+  if(S.logPinned) pane.scrollTop = pane.scrollHeight;
+  $('#evCount').textContent = S.ev?`共 ${S.ev} 条`:'';
+}
+$('#logKeyOnly').addEventListener('change',ev=>
+  document.body.classList.toggle('log-key-only',ev.target.checked));
+$('#logClearBtn').addEventListener('click',()=>{ $('#logPane').innerHTML=''; });
+$('#logPane').addEventListener('scroll',ev=>{
+  const el = ev.target;
+  S.logPinned = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+},{passive:true});
+
+/* ---------- gallery ---------- */
+function captionOf(name){
+  const base = name.replace(/\.(png|jpe?g)$/,'');
+  const parts = base.split('-');
+  const ns = parts.shift(); const win = parts.shift()||'';
+  let tag = parts.join('-')||'shot', cls='t-evidence', label=tag;
+  if(tag.endsWith('-before')){cls='t-before';label='操作前';}
+  else if(tag.endsWith('-after')){cls='t-after';label='操作后';}
+  return {ns,win,tag,cls,label};
+}
+function renderGallery(images){
+  const wrap = $('#gallery');
+  for(const name of images){
+    if(name.startsWith('latest-') || S.seenImg.has(name)) continue;
+    S.seenImg.add(name);
+    const cap = captionOf(name);
+    const fig = document.createElement('figure');
+    fig.innerHTML = `<img loading="lazy" src="/img/${encodeURIComponent(name)}" alt="${cap.win} ${cap.tag}">
+      <figcaption><span class="win-tag" style="font-size:9.5px;padding:1px 6px">${cap.win}</span>
+      <span class="tag ${cap.cls}">${cap.label}</span><span>${cap.ns.slice(-6)}</span></figcaption>`;
+    fig.addEventListener('click',()=>openLightbox(name,cap));
+    wrap.prepend(fig);
+  }
+  while(wrap.children.length>120) wrap.lastElementChild.remove();
+}
+function openLightbox(name,cap){
+  $('#lbImg').src = '/img/'+encodeURIComponent(name);
+  $('#lbCap').textContent = `${cap.win} · ${cap.label}(${cap.tag}) · ${cap.ns}`;
+  $('#lightbox').classList.remove('hidden');
+}
+$('#lightbox').addEventListener('click',()=>$('#lightbox').classList.add('hidden'));
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){ $('#lightbox').classList.add('hidden'); closeSettings(); }
+});
+
+/* ---------- polling ---------- */
+let pollTimer = null;
+function startPoll(){
+  if(pollTimer) clearInterval(pollTimer);
+  if(S.cfg.pollMs > 0) pollTimer = setInterval(poll, S.cfg.pollMs);
+}
+async function poll(){
+  if(S.paused) return;
+  try{
+    const r = await fetch(`/api/data?tl_after=${S.tl}&ev_after=${S.ev}`);
+    const d = await r.json();
+    if(d.timeline){ appendLanes(d.timeline); prependRows(d.timeline); }
+    if(d.events) appendLog(d.events);
+    if(d.tl_total!=null) S.tl = d.tl_total;
+    if(d.ev_total!=null) S.ev = d.ev_total;
+    const times = [];
+    if(d.timeline&&d.timeline.length) times.push(d.timeline[0].time, d.timeline[d.timeline.length-1].time);
+    if(d.events&&d.events.length) times.push(d.events[0].time);
+    if(d.state) ensureCards(d);
+    if(times.length) S.firstTs = S.firstTs?Math.min(S.firstTs,...times):Math.min(...times);
+    if(d.state) renderCards(d);
+    renderMeta(d);
+    renderGallery(d.images||[]);
+    if(d.run_dir) $('#runDir').textContent = d.run_dir;
+  }catch(err){ /* transient; dot flips on next meta render */ }
+}
+startPoll();
+poll();
+
+/* ---------- settings panel ---------- */
+const SETTINGS_FIELDS = [['setPoll','pollMs'],['setLane','laneCap'],['setTl','tlRows'],
+                         ['setLog','logLines'],['setCleanKeep','cleanKeepH']];
+function openSettings(){ $('#settings').classList.remove('hidden'); }
+function closeSettings(){ $('#settings').classList.add('hidden'); }
+function syncSettingsUI(){
+  for(const [id, key] of SETTINGS_FIELDS) $('#'+id).value = String(S.cfg[key]);
+}
+function syncGcUI(p){
+  $('#setGc').value = p && p.enabled ? '1' : '0';
+  $('#setGcFrames').value = String(p ? (p.frames_max_age_h||6) : 6);
+  $('#setGcEvidence').value = String(p ? (p.evidence_max_age_h||2) : 2);
+}
+async function saveGc(){
+  const policy = {enabled: $('#setGc').value==='1',
+                  frames_max_age_h: Number($('#setGcFrames').value),
+                  evidence_max_age_h: Number($('#setGcEvidence').value)};
+  try{ const r = await (await fetch('/api/gc',{method:'POST',
+      body:JSON.stringify(policy)})).json(); syncGcUI(r.policy); }
+  catch(e){ /* transient */ }
+}
+['setGc','setGcFrames','setGcEvidence'].forEach(id=>
+  $('#'+id).addEventListener('change', saveGc));
+SETTINGS_FIELDS.forEach(([id, key])=>{
+  $('#'+id).addEventListener('change', ev=>{
+    S.cfg[key] = Number(ev.target.value); saveCfg();
+    if(key === 'pollMs') startPoll();
+  });
+});
+$('#settingsBtn').addEventListener('click', ()=>{
+  openSettings();
+  fetch('/api/gc').then(r=>r.json()).then(d=>syncGcUI(d.policy)).catch(()=>{});
+});
+$('#setClose').addEventListener('click', closeSettings);
+syncSettingsUI();
+
+/* ---------- controls ---------- */
+$('#pauseBtn').addEventListener('click',ev=>{
+  S.paused = !S.paused;
+  ev.target.textContent = S.paused?'恢复刷新':'暂停刷新';
+  ev.target.style.borderColor = S.paused?'var(--gold)':'';
+  if(!S.paused){ startPoll(); poll(); }
+});
+$('#winFilter').addEventListener('change',ev=>{
+  document.body.classList.remove('win-left','win-right');
+  if(ev.target.value) document.body.classList.add('win-'+ev.target.value);
+});
+$('#keyOnly').addEventListener('change',ev=>
+  document.body.classList.toggle('key-only',ev.target.checked));
+$('#stopBtn').addEventListener('click',async ev=>{
+  const btn = ev.target;
+  if(!S.stopArmed){
+    S.stopArmed = true; btn.textContent = '确认 STOP？'; btn.classList.add('armed');
+    S.stopTimer = setTimeout(()=>{S.stopArmed=false;btn.textContent='停止运行';btn.classList.remove('armed');},3000);
+    return;
+  }
+  clearTimeout(S.stopTimer);
+  try{ await fetch('/api/stop',{method:'POST'}); btn.textContent='已请求停止'; }
+  catch(e){ btn.textContent='请求失败'; }
+  btn.disabled = true;
+});
+let cleanArmed=false, cleanTimer=null;
+$('#cleanBtn').addEventListener('click',async ev=>{
+  const btn = ev.target;
+  if(!cleanArmed){
+    cleanArmed = true; btn.textContent = '确认清理 frames/？'; btn.classList.add('armed');
+    cleanTimer = setTimeout(()=>{cleanArmed=false;btn.textContent='清理历史帧';btn.classList.remove('armed');},3000);
+    return;
+  }
+  clearTimeout(cleanTimer);
+  cleanArmed = false; btn.textContent='清理中…'; btn.disabled = true;
+  try{
+    const r = await (await fetch('/api/cleanup',{method:'POST',
+      body:JSON.stringify({max_age_seconds:(S.cfg.cleanKeepH||0)*3600})})).json();
+    $('#cleanInfo').textContent = r.deleted!=null ? `已清理 ${r.deleted} 张，释放 ${(r.freed_bytes/1048576).toFixed(1)} MB` : '清理失败';
+    S.seenImg.clear(); $('#gallery').innerHTML = '';
+  }catch(e){ $('#cleanInfo').textContent = '清理失败'; }
+  btn.textContent='清理历史帧'; btn.classList.remove('armed'); btn.disabled = false;
+});
+</script>
+</body>
+</html>

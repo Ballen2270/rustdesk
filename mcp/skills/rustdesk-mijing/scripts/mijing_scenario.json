@@ -1,0 +1,37 @@
+{
+  "images_dir": "images",
+  "native": [2400, 900],
+  "window_split": 1200,
+  "start_state": {"left": "normal", "right": "normal"},
+  "states": {
+    "normal": {"image": "normal/游戏正常界面.png"},
+    "activity_panel": {"image": "normal/活动面板.png"},
+    "yunleyou_menu": {"image": "normal/云乐游-秘境降妖.png"},
+    "mijing_panel": {"image": "normal/秘境降妖面板.png"},
+    "in_instance": {"image": "normal/进入秘境降妖.png"},
+    "fight18": {"image": "normal/秘境降妖18关.png"},
+    "fight24": {"image": "normal/秘境降妖24关.png"},
+    "fight25": {"image": "normal/秘境25关.png"},
+    "battle": {"image": "战斗ing.png"},
+    "cleared": {"image": "normal/通关.png"}
+  },
+  "transitions": [
+    {"from": "normal", "click_text": "活动", "box": [0.22, 0.00, 0.16, 0.12], "to": "activity_panel", "settle": 0.5},
+    {"from": "activity_panel", "click_text": "参加", "box": [0.78, 0.46, 0.20, 0.16], "to": "yunleyou_menu", "settle": 1.0},
+    {"from": "yunleyou_menu", "click_text": "秘境降妖", "box": [0.66, 0.40, 0.34, 0.16], "to": "mijing_panel", "settle": 0.5},
+    {"from": "mijing_panel", "click_text": "继续挑战", "box": [0.74, 0.70, 0.26, 0.22], "to": "in_instance", "settle": 1.0},
+    {"from": "in_instance", "click_text": "第", "box": [0.62, 0.30, 0.38, 0.20], "to": "battle", "settle": 0.5},
+    {"from": "fight18", "click_text": "进入战斗", "box": [0.66, 0.55, 0.34, 0.20], "to": "battle", "settle": 0.5},
+    {"from": "fight24", "click_text": "进入战斗", "box": [0.66, 0.55, 0.34, 0.20], "to": "battle", "settle": 0.5},
+    {"from": "fight25", "click_text": "进入战斗", "box": [0.66, 0.55, 0.34, 0.20], "to": "battle", "settle": 0.5},
+    {"from": "cleared", "click_text": "离开", "box": [0.84, 0.40, 0.16, 0.14], "to": "normal", "settle": 1.0}
+  ],
+  "auto": [
+    {"from": "battle", "after": 2, "to": "in_instance", "count": 16},
+    {"from": "battle", "after": 2, "to": "fight18", "count": 1},
+    {"from": "battle", "after": 2, "to": "battle", "count": 5},
+    {"from": "battle", "after": 2, "to": "fight24", "count": 1},
+    {"from": "battle", "after": 2, "to": "fight25", "count": 1},
+    {"from": "battle", "after": 2, "to": "cleared"}
+  ]
+}
