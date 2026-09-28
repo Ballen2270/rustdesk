@@ -73,6 +73,10 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IPC_TIMEOUT_S = 30.0
+# Worst legit serialized action ≈ 10s first-frame wait + 3s stale wait + 30s
+# IPC; beyond that the bridge is wedged and queueing behind it forever is
+# what turns one bad IPC into a dead fleet — fail fast instead.
+ACTION_LOCK_TIMEOUT_S = 45.0
 # Shared with rustdesk_mcp.py single-device mode (screenshots of all devices
 # land in the same content-hash-named directory, prefixed by device name).
 SCREENSHOT_DIR = os.environ.get("RUSTDESK_SCREENSHOT_DIR", "~/rustdesk-screenshots")
@@ -191,6 +195,7 @@ class Device:
     last_activity: float = field(default_factory=time.monotonic)
     extend_until: float = 0.0  # keep_alive deadline; suppresses sleep before it
     started_at: float = 0.0  # when WE spawned the bridge (max_duration anchor)
+    orphan_seen: float = 0.0  # first sight of the current orphaned external bridge
 
     # ---- lease ---------------------------------------------------------
 
@@ -382,16 +387,24 @@ class Device:
     # ---- lifecycle -----------------------------------------------------
 
     @contextmanager
-    def action(self) -> Iterator[None]:
+    def action(self, timeout_s: float | None = None) -> Iterator[None]:
         """Serialize a tool action on this device and keep the watchdog from
-        sleeping it mid-action."""
-        with self.action_lock:
-            self.in_flight += 1
-            try:
-                yield
-            finally:
-                self.in_flight -= 1
-                self.touch()
+        sleeping it mid-action. Acquisition is bounded: a previous action
+        stuck longer than the timeout means a wedged bridge — raise instead
+        of queueing behind it forever (the caller surfaces restart_bridge)."""
+        timeout = ACTION_LOCK_TIMEOUT_S if timeout_s is None else timeout_s
+        if not self.action_lock.acquire(timeout=timeout):
+            raise RuntimeError(
+                f"[{self.cfg.name}] device busy: the previous action has held the device "
+                f"for >{timeout:.0f}s (wedged bridge?) — call restart_bridge to force-recover"
+            )
+        self.in_flight += 1
+        try:
+            yield
+        finally:
+            self.in_flight -= 1
+            self.touch()
+            self.action_lock.release()
 
     def _teardown_owned(self) -> bool:
         """Graceful stop of OUR child: 'quit' (closes the remote session),
@@ -422,31 +435,177 @@ class Device:
                         pass
             return True
 
+    def port_listener_pids(self) -> list[int]:
+        """PIDs of the process(es) LISTENING on this device's port — our
+        child, a manual one, an orphan: whoever owns it right now."""
+        try:
+            r = subprocess.run(
+                ["lsof", "-tiTCP:" + str(self.cfg.port), "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return [int(p) for p in r.stdout.split()]
+
+    def external_status(self) -> dict[str, Any]:
+        """Status of a bridge we did not spawn. Never raises: {} when it is
+        unreachable or replies with an error (treated as unresponsive).
+        Deliberately does NOT go through ipc() — that auto-ensures (spawns a
+        bridge) on connect failure, and probes (watchdog sweep, stop/restart
+        checks) must never wake a sleeping device."""
+        try:
+            ty, payload = self.ipc_once({"cmd": "status"}, touch=False)
+            if ty != 0x01:
+                return {}
+            st = json.loads(payload.decode())
+            return st if st.get("ok", False) else {}
+        except (OSError, RuntimeError, ValueError):
+            return {}
+
+    def force_recover(self) -> str:
+        """Kill whatever bridge listens on our port — ours or external —
+        WITHOUT taking action_lock (a wedged action holds it; killing the
+        bridge is what unblocks that action's socket). Explicit recovery
+        path only (restart/stop on an unresponsive bridge); the idle
+        watchdog never calls this on a parented external bridge."""
+        pids = self.port_listener_pids()
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and self.port_listener_pids():
+            time.sleep(0.1)
+        for pid in self.port_listener_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if self.port_listener_pids():
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and self.port_listener_pids():
+                time.sleep(0.1)
+        if self.spawned is not None and self.spawn_lock.acquire(timeout=2.0):
+            try:
+                try:
+                    self.spawned.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+                if self.spawned.poll() is not None:
+                    self.spawned = None  # our child died out-of-band; let ensure() respawn
+            finally:
+                self.spawn_lock.release()
+        if not pids:
+            return f"[{self.cfg.name}] nothing listening on port {self.cfg.port}"
+        return f"[{self.cfg.name}] killed unresponsive bridge pid(s) {pids}"
+
+    def sweep_orphan(self) -> None:
+        """Idle-release for ORPHANED external bridges — a listener whose
+        spawning MCP session died without cleanup (parent process gone,
+        PPID re-parented to 1). Nobody owns its lease, so after idle_timeout
+        with no owning session activity it is a leak holding the port and
+        the remote connection: reap it. Parented bridges (a live terminal or
+        another server spawned them) and our own children are never touched
+        here — those go through the ordinary reuse-only / lease policies."""
+    def _parent_pid(self, pid: int) -> int | None:
+        """PID of `pid`'s parent process; None when it cannot be read (the
+        process vanished, or ps failed)."""
+        try:
+            r = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                               capture_output=True, text=True, timeout=5)
+            out = r.stdout.strip()
+            return int(out) if r.returncode == 0 and out else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+    def sweep_orphan(self) -> None:
+        """Idle-release for ORPHANED external bridges — a listener whose
+        spawning MCP session died without cleanup (parent process gone,
+        PPID re-parented to 1). Nobody owns its lease, so after idle_timeout
+        with no owning session activity it is a leak holding the port and
+        the remote connection: reap it. Parented bridges (a live terminal or
+        another server spawned them) and our own children are never touched
+        here — those go through the ordinary reuse-only / lease policies."""
+        if self.in_flight > 0:
+            return
+        pids = self.port_listener_pids()
+        if not pids or self.spawned is not None:
+            self.orphan_seen = 0.0
+            return
+        ppid = self._parent_pid(pids[0])
+        if ppid is None or ppid not in (0, 1):
+            # parented (or unprovable) — never ours to reap
+            self.orphan_seen = 0.0
+            return
+        st = self.external_status()
+        if st.get("connected") or st.get("pending_2fa"):
+            # live session an unknown controller may still be using — reset
+            self.orphan_seen = 0.0
+            return
+        now = time.monotonic()
+        if self.orphan_seen == 0.0:
+            self.orphan_seen = now
+            return
+        threshold = self.cfg.idle_timeout or 600.0
+        if now - self.orphan_seen >= threshold:
+            print(
+                f"[rustdesk-mcp] [{self.cfg.name}] reaping orphaned bridge pid(s) {pids} "
+                f"(parent gone, unresponsive for {threshold:.0f}s)",
+                file=sys.stderr,
+            )
+            self.force_recover()
+            self.orphan_seen = 0.0
+
     def stop(self) -> str:
-        """Explicit termination of OUR bridge: session closed ('quit') and
-        the process stopped. An external bridge (one we did not spawn) is
-        left completely untouched — not even 'quit', which would close a
-        session other controllers may be using (reuse-only policy)."""
-        with self.action_lock:
+        """Explicit termination of the device's bridge. Takes action_lock
+        ITSELF (bounded) — callers must NOT already hold it: the old pattern
+        of wrapping this in action() self-deadlocked on the non-reentrant
+        lock. An external bridge that is connected (or mid-2FA) is left
+        untouched — not even 'quit', which would close a session other
+        controllers may be using; an unresponsive external bridge (the
+        wedged case this exists for) is force-killed."""
+        if not self.action_lock.acquire(timeout=ACTION_LOCK_TIMEOUT_S):
+            raise RuntimeError(
+                f"[{self.cfg.name}] device busy: the previous action has held the device "
+                f"for >{ACTION_LOCK_TIMEOUT_S:.0f}s (wedged bridge?) — call restart_bridge "
+                "to force-recover"
+            )
+        self.in_flight += 1
+        try:
             if self.spawned is None:
-                if self.alive():
+                pids = self.port_listener_pids()
+                if not pids:
+                    return f"[{self.cfg.name}] already stopped"
+                st = self.external_status()
+                if st.get("connected") or st.get("pending_2fa"):
                     return (
-                        f"[{self.cfg.name}] external bridge is running — left untouched "
-                        "(not ours to stop)"
+                        f"[{self.cfg.name}] external bridge is running and connected — "
+                        "left untouched (not ours to stop)"
                     )
-                return f"[{self.cfg.name}] already stopped"
+                note = self.force_recover()
+                return f"{note}; [{self.cfg.name}] stopped (unresponsive external bridge)"
             self._teardown_owned()
             return f"[{self.cfg.name}] stopped (session closed, bridge process terminated)"
+        finally:
+            self.in_flight -= 1
+            self.touch()
+            self.action_lock.release()
 
     def sleep(self) -> None:
         """Watchdog entry point: put OUR bridge to sleep. The expiry decision
         is re-checked under action_lock, so an action that just started or a
-        keep_alive that just landed always wins the race against the kill."""
-        with self.action_lock:
+        keep_alive that just landed always wins the race against the kill.
+        Non-blocking: a device mid-action is by definition not idle."""
+        if not self.action_lock.acquire(blocking=False):
+            return
+        try:
             reason = self._expiry_reason()
             if reason is None:
                 return
             self._teardown_owned()
+        finally:
+            self.action_lock.release()
         print(
             f"[rustdesk-mcp] [{self.cfg.name}] {reason} — bridge put to sleep; "
             "next tool call respawns it and reconnects",
@@ -553,13 +712,15 @@ class Fleet:
 
     @staticmethod
     def _device_watchdog(dev: Device) -> None:
+        """Lease enforcement (our bridges) + orphan sweep (bridges leaked by
+        dead sessions). Runs even with idle_timeout=0 so orphans are still
+        reaped (sweep falls back to a 600s threshold then)."""
         timers = [t for t in (dev.cfg.idle_timeout, dev.cfg.max_duration) if t > 0]
-        if not timers:
-            return
-        interval = min(30.0, max(1.0, min(timers) / 4))
+        interval = min(30.0, max(5.0, min(timers) / 4)) if timers else 30.0
         while True:
             time.sleep(interval)
             dev.sleep()
+            dev.sweep_orphan()
 
     def stop_all_owned(self) -> None:
         for dev in self.devices.values():
@@ -624,31 +785,56 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
     async def restart_bridge(device: str) -> str:
         """Restart ONE device's bridge so it reloads that device's TOML
         (peer / server / password / video settings), or to recover a wedged
-        session. Other devices are unaffected."""
+        session. A healthy external bridge (connected, not spawned by this
+        server) is reused as-is; an unresponsive one is force-killed and a
+        fresh bridge spawned. Other devices are unaffected."""
         dev = dev_of(device)
 
         def _restart() -> str:
-            with dev.action():
-                if dev.spawned is None and dev.alive():
-                    return (
-                        f"[{device}] external bridge is running — not owned, reused as-is "
-                        "(its TOML was NOT reloaded)"
-                    )
-                dev._teardown_owned()
-                dev.ensure()
-            return f"[{device}] bridge restarted with {dev.cfg.config}"
+            try:
+                with dev.action():
+                    if dev.spawned is None:
+                        pids = dev.port_listener_pids()
+                        st = dev.external_status() if pids else {}
+                        if st.get("connected") or st.get("pending_2fa"):
+                            return (
+                                f"[{device}] external bridge is running and connected — "
+                                "not owned, reused as-is (its TOML was NOT reloaded)"
+                            )
+                        note = ""
+                        if pids:
+                            note = dev.force_recover() + "; "
+                        dev.ensure()
+                        return f"{note}[{device}] bridge spawned with {dev.cfg.config}"
+                    dev._teardown_owned()
+                    dev.ensure()
+                    return f"[{device}] bridge restarted with {dev.cfg.config}"
+            except RuntimeError as exc:
+                if "device busy" in str(exc):
+                    # the wedged action itself holds the lock: kill the
+                    # bridge out-of-band (that unblocks it), then respawn
+                    note = dev.force_recover()
+                    dev.ensure()
+                    return f"{note}; [{device}] bridge respawned"
+                raise
 
         return await to_thread.run_sync(_restart)
 
     async def stop_bridge(device: str) -> str:
         """Terminate ONE device: close its RustDesk session and stop its
         bridge (no remote control of that device until it is started again —
-        any tool call on it spawns it lazily). Other devices are unaffected."""
+        any tool call on it spawns it lazily). Other devices are unaffected.
+        A bridge stuck mid-action is force-killed rather than waited on."""
         dev = dev_of(device)
 
         def _stop() -> str:
-            with dev.action():
-                return dev.stop()
+            try:
+                return dev.stop()  # takes action_lock itself (bounded)
+            except RuntimeError as exc:
+                if "device busy" in str(exc):
+                    note = dev.force_recover()
+                    return f"{note}; [{device}] stopped (wedged action cleared)"
+                raise
 
         return await to_thread.run_sync(_stop)
 

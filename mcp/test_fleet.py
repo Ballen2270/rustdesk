@@ -218,9 +218,17 @@ config = "{dev3}"
     de = ext_fleet.devices["ext"]
     de.ensure()
     check("external bridge reused (not spawned)", de.spawned is None and de.alive())
+    # a CONNECTED external bridge (simulated status) stays reuse-only
+    real_status = de.external_status
+    de.external_status = lambda: {"ok": True, "connected": True, "seq": 5}  # type: ignore[method-assign]
     msg = de.stop()
-    check("stop on external leaves it running", "untouched" in msg and ext.poll() is None, msg)
-    check("external session untouched: status still answers", de.alive())
+    check("stop on connected external leaves it running", "untouched" in msg and ext.poll() is None, msg)
+    de.external_status = real_status  # type: ignore[method-assign]
+    # an UNRESPONSIVE external bridge (never connected — the wedged shape)
+    # is force-killed by an explicit stop
+    msg = de.stop()
+    check("stop kills unresponsive external", "stopped" in msg and ext.poll() is not None, msg)
+    check("port free after force kill", de.port_listener_pids() == [])
 
     # ---- 6. non-loopback host refuses to spawn ---------------------------------
     far = bridge_fleet.Fleet(write(tmp / "far.toml", f"""
@@ -274,6 +282,89 @@ config = "{dev3}"
         check("post-connect failure NOT auto-retried", False, "no error raised")
     except ConnectionError:
         check("post-connect failure NOT auto-retried", True)
+
+    # ---- 7.5 wedged-bridge recovery (2026-09-28 live failure modes) ------------
+    # fake wedged bridge in its OWN process: accepts connections, never replies
+    wedged_port = 21611
+    wedged = subprocess.Popen(
+        [sys.executable, "-c",
+         "import socket\n"
+         f"s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+         f"s.bind(('127.0.0.1', {wedged_port})); s.listen(8)\n"
+         "held = []\n"
+         "while True:\n"
+         "    c, _ = s.accept(); held.append(c)\n"],
+    )
+    time.sleep(0.8)
+    dw = bridge_fleet.Device(
+        cfg=bridge_fleet.DeviceCfg(name="wedged", port=wedged_port, config=dev3),
+        bridge_bin=None,
+    )
+    check("wedged listener detected", dw.port_listener_pids() != [])
+    old_timeout = bridge_fleet.IPC_TIMEOUT_S
+    bridge_fleet.IPC_TIMEOUT_S = 0.5
+    check("external_status on wedged bridge is empty", dw.external_status() == {})
+    # regression: stop() used to self-deadlock when wrapped in action(); now
+    # it takes the lock itself (bounded) and force-kills the wedged external
+    msg = dw.stop()
+    check("stop() kills the wedged external", "stopped" in msg and not dw.port_listener_pids(), msg)
+    check("wedged process dead", wedged.poll() is not None)
+    # action() fails fast instead of queueing behind a stuck holder forever
+    dw.action_lock.acquire()
+    try:
+        with dw.action(timeout_s=0.2):
+            check("action fails fast on stuck lock", False, "no error raised")
+    except RuntimeError as e:
+        check("action fails fast on stuck lock", "device busy" in str(e), str(e))
+    finally:
+        dw.action_lock.release()
+    bridge_fleet.IPC_TIMEOUT_S = old_timeout
+
+    # orphan sweep: idle + parent-dead external bridge gets reaped; parented
+    # or in-flight devices never do
+    class SweepDev(bridge_fleet.Device):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.reaped = False
+            self.ppid = 1  # orphaned by default
+
+        def port_listener_pids(self):  # type: ignore[override]
+            return [] if self.reaped else [4242]
+
+        def external_status(self):  # type: ignore[override]
+            return {}
+
+        def force_recover(self):  # type: ignore[override]
+            self.reaped = True
+            return "reaped"
+
+        def _parent_pid(self, pid):  # type: ignore[override]
+            return self.ppid
+
+    sw = SweepDev(cfg=bridge_fleet.DeviceCfg(name="sw", port=1, idle_timeout=2.0, config=dev3),
+                  bridge_bin=None)
+    sw.sweep_orphan()
+    check("orphan not reaped on first sight", not sw.reaped)
+    time.sleep(1.0)
+    sw.sweep_orphan()
+    check("orphan not reaped before threshold", not sw.reaped)
+    time.sleep(1.2)
+    sw.sweep_orphan()
+    check("idle orphan reaped after threshold", sw.reaped)
+    sw.reaped = False
+    sw.ppid = os.getpid()  # parented by a live process
+    sw.orphan_seen = time.monotonic() - 100
+    sw.sweep_orphan()
+    check("parented bridge never reaped", not sw.reaped)
+    sw.ppid = 1
+    sw.in_flight = 1  # action running on it right now
+    sw.sweep_orphan()
+    check("in-flight device never reaped", not sw.reaped)
+    sw.in_flight = 0
+    sw.external_status = lambda: {"connected": True}  # type: ignore[method-assign]
+    sw.orphan_seen = time.monotonic() - 100
+    sw.sweep_orphan()
+    check("connected external never reaped", not sw.reaped)
 
     # ---- 8. tool registration swap --------------------------------------------
     import rustdesk_mcp
