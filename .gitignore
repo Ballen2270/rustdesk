@@ -63,3 +63,7 @@ flutter/web/
 /mcp/devices/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/
+
+# 本机私有的参考图与启动器运行日志，不入库（mijing SKILL 约定）
+images/normal/
+windows/*.log
