@@ -73,6 +73,8 @@ conda env remove -n rustdesk-mcp
 
 # 仓库内构建产物
 cargo clean        # 或 rm -rf target
+# 若还想保留 target/release/bridge + spike（MCP 依赖，避免重编译），
+# 用保二进制的删法，见 docs/build-cache-cleanup.md
 
 # 临时测试 venv
 rm -rf /tmp/mcpvenv

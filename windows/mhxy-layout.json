@@ -1,0 +1,50 @@
+﻿{
+    "exePath":  "D:\\梦幻西游五开版本\\My\\MyLauncher_x64r.exe",
+    "workingDir":  "",
+    "launchDelaySeconds":  3,
+    "waitTimeoutSeconds":  120,
+    "sweepSeconds":  300,
+    "matchProcesses":  [
+                           "MyGame_x64r",
+                           "MyLauncher_x64r",
+                           "MyPCLauncher_x64r",
+                           "MyPreloader_x64r"
+                       ],
+    "matchTitleKeywords":  [
+                               "梦幻西游"
+                           ],
+    "scaleOnDifferentScreen":  true,
+    "count":  4,
+    "virtualScreen":  {
+                          "x":  0,
+                          "y":  0,
+                          "w":  1920,
+                          "h":  1080
+                      },
+    "windows":  [
+                    {
+                        "x":  957,
+                        "y":  0,
+                        "w":  971,
+                        "h":  755
+                    },
+                    {
+                        "x":  -9,
+                        "y":  291,
+                        "w":  972,
+                        "h":  756
+                    },
+                    {
+                        "x":  -9,
+                        "y":  0,
+                        "w":  974,
+                        "h":  758
+                    },
+                    {
+                        "x":  956,
+                        "y":  289,
+                        "w":  974,
+                        "h":  758
+                    }
+                ]
+}
