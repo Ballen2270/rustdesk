@@ -169,7 +169,8 @@ class ViewerTests(unittest.TestCase):
 
     def test_index_serves_viewer_html(self):
         body = self.get('/')
-        self.assertIn(b'\xe5\x89\x91\xe4\xbc\x9a\xe8\xa7\x82\xe5\xaf\x9f\xe5\x8f\xb0', body)  # 剑会观察台
+        self.assertIn('运行观察台'.encode(), body)  # neutral title (jianhui + mijing share the console)
+        self.assertIn(b'id="tabs"', body)           # tab navigation present
 
 
 if __name__ == '__main__':

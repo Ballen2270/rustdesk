@@ -86,6 +86,12 @@ profile = Profile(
 5. unknown 持续 → warning 禁输入;截图分辨率/裁剪校验,变了即停
 6. STOP 文件 + SIGTERM;操作前后证据帧强制落盘;timeline 全量;keep_alive 续约
 7. 循环耗时上界;状态产物原子写;离线(mock/replay/单测)三件套先于真机
+8. **启动对位检查**(2026-09-28 加,menpai 首跑教训:窗口位置会变,绝不信旧校准):
+   启动时每个配置矩形必须真的框住游戏客户端(顶栏 活动/排行/指引 至少一个可读),
+   否则停机并把该设备全屏存为 `misaligned-<device>.png` 供重新校准;模型侧流程同样
+   强制"每次启动先重新截图核对,不问用户"。固定坐标锚点(如活动按钮)启动时从
+   OCR 现场重推导,其余点击都落在 OCR 项上、天然抗漂移。menpai 已全量实装,
+   jianhui/mijing 已实装存证分支。
 
 ## 五、Console / Mock / 测试的通用化
 
@@ -99,6 +105,12 @@ profile = Profile(
 - **Phase B**:抽 runner+policy,jianhui 改写为 profile.py + 薄入口;现有 24 项单测迁移为表驱动,语义必须逐一复刻
 - **Phase C**:写第一个新 skill(真实消费者,反推框架缺口)
 - **Phase D**:观察台多 run 切换/历史列表、profile 热校准工作流(inspect 辅助测量槽位)
+
+### Phase A/C 落地记录(2026-09-20,分支 patch/mhxy-skills)
+
+- `_framework/` 已建:`vision`(OCR/区域放大/绿底/战斗锚点,自 jianhui 逐字节平移)、`artifacts`(原子写/JSONL)、`session`(MCP stdio + keep_alive 租约)、`humanize`(点击/滚轮拟人:内区采样、坐标历史去重、随机延迟、分段滚轮)、`workflow`(声明式 Screen 签名 + Node 节点引擎)、`mock`(剧本驱动离线 MCP,几何盒优先/OCR 文本兜底解析点击)。
+- jianhui 仅改 import(vision/artifacts),`ocr()` 等已核对逐字节一致;**剑会 session/policy 迁移推迟到 Phase B**——本机 Vision 对 `匹配界面单个.png` 1x 标题识别漂移(3x 可读,置信 1.0),属拆分前既存环境问题,按"行为零变化"原则本轮不动剑会识别逻辑;其单测 27 项 + viewer 7 项仍全绿。
+- 首个 workflow 引擎消费者:`rustdesk-mijing`(秘境降妖,单人活动)。 Screen 声明顺序=优先级(弹窗>菜单>面板>场景);竖排"继续挑战"按钮 OCR 产出分离 item,签名锚定 继续+挑战 双词;`find_row_button` 按中心距行带匹配(游戏按钮略低于行文字,包围盒重叠不可靠)。
 
 ## 六点五、视觉吞吐与多设备规模(2026-09-19 实测,14 核 Mac)
 

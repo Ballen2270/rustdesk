@@ -1,0 +1,14 @@
+{
+  "device": "pc1",
+  "calibrated": false,
+  "native_resolution": [1278, 956],
+  "rounds": 1,
+  "humanize": true,
+  "windows": [
+    {"name": "main", "rect": [0, 0, 0, 0], "device": "pc1"}
+  ],
+  "activity_button": [0.24, 0.0, 0.12, 0.11],
+  "activity_list_scroll": [0.45, 0.25, 0.35, 0.40],
+  "advance_delay": 5,
+  "advance_stall": 150
+}

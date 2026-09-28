@@ -18,42 +18,13 @@ import sys
 import time
 
 from PIL import Image
-from local_features import BattleAnchors, green_label
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))  # mcp/skills, for _framework
+from _framework.artifacts import save, shot_name
+from _framework.vision import BattleAnchors, green_label, ocr, region_ocr
 
 SLOTS = [[.20, .65, .16, .15], [.37, .68, .16, .15],
          [.56, .65, .16, .15], [.75, .62, .17, .16]]
-
-
-def ocr(img):
-    import Quartz
-    import Vision
-    buf = io.BytesIO()
-    img.convert('RGB').save(buf, format='PNG')
-    raw = buf.getvalue()
-    data = Quartz.CFDataCreate(None, raw, len(raw))
-    src = Quartz.CGImageSourceCreateWithData(data, None)
-    if src is None:
-        raise RuntimeError('Cannot decode OCR image')
-    cg = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
-    req = Vision.VNRecognizeTextRequest.alloc().init()
-    req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-    req.setRecognitionLanguages_(['zh-Hans', 'en-US'])
-    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
-    ok, err = handler.performRequests_error_([req], None)
-    if not ok:
-        raise RuntimeError(str(err))
-    items = []
-    for obs in req.results() or []:
-        candidates = obs.topCandidates_(1)
-        if not candidates:
-            continue
-        candidate = candidates[0]
-        b = obs.boundingBox()
-        items.append(dict(text=str(candidate.string()).replace(' ', ''),
-                          score=float(candidate.confidence()),
-                          x=float(b.origin.x), y=float(1-b.origin.y-b.size.height),
-                          w=float(b.size.width), h=float(b.size.height)))
-    return items
 
 
 def classify(items, keyword='', slots=SLOTS):
@@ -91,18 +62,6 @@ def classify(items, keyword='', slots=SLOTS):
     else:
         state = 'unknown'
     return dict(state=state, ready=ready, button=kick_button if state == 'kickwarn' else button)
-
-
-def region_ocr(img, box, scale=1):
-    w, h = img.size
-    x, y, a, b = box
-    left, top, right, bottom = round(x*w), round(y*h), round((x+a)*w), round((y+b)*h)
-    region = img.crop((left, top, right, bottom))
-    items = ocr(region.resize((region.width*scale, region.height*scale)))
-    for it in items:
-        it.update(x=(left+it['x']*region.width)/w, y=(top+it['y']*region.height)/h,
-                  w=it['w']*region.width/w, h=it['h']*region.height/h)
-    return items
 
 
 def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False):
@@ -198,16 +157,6 @@ def advance(s, obs, now, target, room_timeout=90):
     return None
 
 
-def save(path, data):
-    tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-    tmp.replace(path)
-
-
-def shot_name(win, tag):
-    return f"{time.time_ns()}-{win}-{tag}.png"
-
-
 def checkpoint(args):
     """Package a verified, stopped run into the documented --resume-state format."""
     state = json.loads(args.state.read_text())
@@ -224,30 +173,53 @@ def checkpoint(args):
     return data
 
 
+def configured_devices(cfg):
+    """Return only the MCP devices referenced by configured windows."""
+    return sorted({win.get('device', cfg['device']) for win in cfg['windows']})
+
+
+def close_retry_needed(state, observed_state, now):
+    """A close retry is safe to consider only while the panel is still visible."""
+    return (state.get('pending') == 'close' and observed_state == 'panel'
+            and not state.get('close_esc') and now-state.get('sent', 0) > 4)
+
+
 def validate(cfg, games):
     if cfg.get('device') != 'pc1' or not cfg.get('calibrated'):
         raise ValueError('Requires calibrated pc1 configuration')
-    nw, nh = cfg['native_resolution']
+    base_resolution = cfg.get('native_resolution')
+    if (not isinstance(base_resolution, list) or len(base_resolution) != 2
+            or any(type(v) is not int or v < 1 for v in base_resolution)):
+        raise ValueError('Invalid native_resolution')
     windows = cfg['windows']
     if len(windows) != 2 or len(set(w['name'] for w in windows)) != 2:
         raise ValueError('Exactly two distinct windows required')
+    rectangles = []
     for win in windows:
-        x, y, w, h = win['rect']
+        rect = win.get('rect')
+        if (not isinstance(rect, list) or len(rect) != 4
+                or any(type(v) is not int for v in rect)):
+            raise ValueError('Invalid native content rectangle')
+        x, y, w, h = rect
         if not re.fullmatch(r'[a-z0-9_-]+', win['name']) or not win['room_keyword']:
             raise ValueError('Invalid name or missing room identity')
         dev = win.get('device')
         if dev is not None and not re.fullmatch(r'[a-z0-9_-]+', dev):
             raise ValueError('Invalid window device name')
+        resolution = base_resolution
         if 'native_resolution' in win:
-            r = win['native_resolution']
+            r = win.get('native_resolution')
             if (not isinstance(r, list) or len(r) != 2
                     or any(type(v) is not int or v < 1 for v in r)):
                 raise ValueError('Invalid window native_resolution')
+            resolution = r
+        nw, nh = resolution
         if min(x, y) < 0 or not 300 <= w <= 2560 or h < 300 or x+w > nw or y+h > nh:
             raise ValueError('Invalid native content rectangle')
-    a, b = [win['rect'] for win in windows]
-    if max(a[0], b[0]) < min(a[0]+a[2], b[0]+b[2]) and max(a[1], b[1]) < min(a[1]+a[3], b[1]+b[3]):
-        raise ValueError('Game content rectangles must not overlap')
+        rectangles.append((win.get('device', cfg['device']), rect))
+    (device_a, a), (device_b, b) = rectangles
+    if device_a == device_b and max(a[0], b[0]) < min(a[0]+a[2], b[0]+b[2]) and max(a[1], b[1]) < min(a[1]+a[3], b[1]+b[3]):
+        raise ValueError('Game content rectangles must not overlap on the same device')
     counts = cfg.get('initial_counts', [0, 0])
     if len(counts) != 2 or any(type(n) is not int or not 0 <= n <= games for n in counts):
         raise ValueError('Invalid initial counts')
@@ -351,7 +323,29 @@ async def run(args):
                     if img.size != (w, h):
                         raise RuntimeError('Crop resized or clipped')
                     return img
-                devices = sorted({cfg['device'], *(win_device(w) for w in cfg['windows'])})
+
+                async def capture_device(dev):
+                    """Full-device frame at native resolution — miscalibration evidence."""
+                    content = await call('screenshot', dev, format='png', max_width=2560)
+                    blob = next(c.data for c in content if c.type == 'image')
+                    return Image.open(io.BytesIO(base64.b64decode(blob))).convert('RGB')
+
+                saved_evidence = set()
+
+                async def save_alignment_evidence(dev, why):
+                    """One full-desktop screenshot per device per run: the picture the
+                    operator recalibrates window rects from. Best-effort only."""
+                    if dev in saved_evidence:
+                        return
+                    saved_evidence.add(dev)
+                    try:
+                        full = await capture_device(dev)
+                        name = f'misaligned-{dev}.png'
+                        full.save(args.output/name)
+                        event(device=dev, misaligned=name, reason=why)
+                    except Exception:  # noqa: BLE001 — evidence is best-effort
+                        pass
+                devices = configured_devices(cfg)
                 last_frame: dict[str, float] = {}
                 lease = 0
                 loop_index = 0
@@ -374,6 +368,7 @@ async def run(args):
                         if not s.get('initialized'):
                             if obs['state'] not in ('room', 'ready', 'panel'):
                                 s['paused'] = 'start requires prepared room; reconcile ongoing match'
+                                await save_alignment_evidence(win_device(win), f'start state {obs["state"]}')
                             s['initialized'] = True
                         prior = s.get('seen')
                         had_pending = s.get('pending')
@@ -381,18 +376,29 @@ async def run(args):
                         confirmed = had_pending if had_pending and not s.get('pending') else None
                         if confirmed:
                             s.pop('close_esc', None)
-                        if (args.execute and s.get('pending') == 'close' and obs['state'] == 'panel'
-                                and not s.get('close_esc') and time.monotonic()-s.get('sent', 0) > 4):
-                            # Right-click only lands on an active window; activate, then right-click again.
-                            s['close_esc'] = True
-                            s['sent'] = time.monotonic()
-                            x, y, w, h = win['rect']
-                            px, py = cfg.get('panel_close', [.907, .122])
-                            tx, ty = round(x+w*px), round(y+h*py)
-                            event(window=win['name'], intent='close-activate')
-                            await call('click', win_device(win), x=tx, y=ty, humanize=False)
-                            await call('click', win_device(win), x=tx, y=ty, humanize=False, button='right')
-                            event(window=win['name'], sent='close-activate')
+                        if args.execute and close_retry_needed(s, obs['state'], time.monotonic()):
+                            # Re-observe immediately before the retry; the first right-click may
+                            # already have closed the panel between regular polls.
+                            retry_img = await capture(win)
+                            retry_obs, _ = await asyncio.to_thread(
+                                recognize, retry_img, win['room_keyword'],
+                                win.get('ready_slots', cfg.get('ready_slots', SLOTS)))
+                            if retry_obs['state'] == 'panel':
+                                s['close_esc'] = True
+                                s['sent'] = time.monotonic()
+                                before = shot_name(win['name'], 'close-retry-before')
+                                retry_img.save(args.output/before)
+                                x, y, w, h = win['rect']
+                                px, py = cfg.get('panel_close', [.907, .122])
+                                tx, ty = round(x+w*px), round(y+h*py)
+                                event(window=win['name'], intent='close-retry', before=before)
+                                await call('click', win_device(win), x=tx, y=ty,
+                                           humanize=False, button='right')
+                                event(window=win['name'], sent='close-retry')
+                            else:
+                                event(window=win['name'], action_aborted='close-retry',
+                                      reason='state changed on recheck',
+                                      observed=retry_obs['state'])
                         if s.get('active') and obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
                             anchors[i].learn(img)
                         if obs['state'] in ('room', 'ready', 'result', 'panel'):

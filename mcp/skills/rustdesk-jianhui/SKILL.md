@@ -9,6 +9,8 @@ description: 使用 RustDesk MCP 控制 pc1 上两个梦幻西游手游房主窗
 
 ## 开始前
 
+**每次启动第一件事：重新截图核对客户端位置（无需询问，直接做）。** 窗口位置会变，绝不沿用上一次的配置矩形——先抓每台设备全屏，确认每个配置窗口矩形内确实是游戏客户端，不符就重新校准再启动。runner 侧有同款机械守卫：首帧不是已准备画面会停机并把全屏截图存为运行目录的 `misaligned-<device>.png`，用它重新校准。
+
 设计、安装或校准不等于开始匹配。用户明确说开始/试跑之后才运行 `--execute`。用户指定试跑场数时遵从；否则默认十场。
 
 仓库：`/Users/yanjoy/codeWorkSpace/vscode/rustdesk`。解释器从仓库 `.mcp.json` 的 rustdesk.command 读取；当前是 `/opt/homebrew/Caskroom/miniconda/base/envs/rustdesk-mcp/bin/python`。
