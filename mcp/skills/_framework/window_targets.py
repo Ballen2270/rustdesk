@@ -70,8 +70,8 @@ def build_config(template, inventory_paths, targets, identities, activity):
     if activity not in ACTIVITIES:
         raise ValueError('Unknown activity')
     if (activity == 'jianhui' and len(targets) != 2
-            or activity in ('zhuagui', 'fuben') and not 1 <= len(targets) <= 2
-            or activity in ('menpai', 'mijing') and not 1 <= len(targets) <= 8):
+            or activity in ('zhuagui', 'fuben', 'menpai') and not 1 <= len(targets) <= 2
+            or activity == 'mijing' and not targets):
         raise ValueError('Invalid number of selected windows for '+activity)
     if len(set(targets)) != len(targets):
         raise ValueError('Select each window only once')

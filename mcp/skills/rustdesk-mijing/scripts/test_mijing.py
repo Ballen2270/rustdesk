@@ -283,6 +283,20 @@ class ValidateTests(unittest.TestCase):
     def test_ok(self):
         validate(self.base(), rounds=1)
 
+    def test_more_than_eight_accounts(self):
+        cfg = self.base()
+        cfg['windows'] = [dict(name='w'+str(i), device='pc'+str(i), rect=[0, 0, 900, 700])
+                          for i in range(12)]
+        validate(cfg, 1)
+
+    def test_empty_or_duplicate_account_names_rejected(self):
+        cfg = self.base()
+        for windows in ([], [dict(name='same', device='pc'+str(i), rect=[0, 0, 900, 700])
+                            for i in range(2)]):
+            cfg['windows'] = windows
+            with self.assertRaisesRegex(ValueError, 'at least one account window'):
+                validate(cfg, 1)
+
     def test_uncalibrated(self):
         cfg = self.base()
         cfg['calibrated'] = False

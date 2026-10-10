@@ -89,6 +89,23 @@ class SelectionTests(Fixtures, unittest.TestCase):
                            ['甲的房间', '乙的房间'], 'jianhui')
         self.assertEqual([w['room_keyword'] for w in cfg['windows']], ['甲', '乙'])
 
+    def test_menpai_rejects_more_than_two_leaders(self):
+        self.assertEqual(len(self.config('menpai')['windows']), 2)
+        with self.assertRaisesRegex(ValueError, 'number of selected windows'):
+            build_config(self.template, self.paths, ['pc1:1', 'pc1:2', 'pc1:3'],
+                         ['甲', '乙', '丙'], 'menpai')
+
+    def test_mijing_accepts_more_than_eight_accounts(self):
+        path = self.root/'pc3.json'
+        path.write_text(json.dumps(inventory('pc3')))
+        targets = [device+':'+str(i) for device in ('pc1', 'pc2', 'pc3')
+                   for i in range(1, 5)]
+        cfg = build_config(self.template, self.paths+[path], targets, [], 'mijing')
+        self.assertEqual(len(cfg['windows']), 12)
+        self.assertTrue(all(w['role'] == 'account' for w in cfg['windows']))
+        with self.assertRaisesRegex(ValueError, 'number of selected windows'):
+            build_config(self.template, self.paths, [], [], 'mijing')
+
     def test_duplicate_targets_and_missing_leader_identity_rejected(self):
         with self.assertRaises(ValueError):
             build_config(self.template, self.paths, ['pc1:1', 'pc1:1'], ['甲', '乙'], 'fuben')

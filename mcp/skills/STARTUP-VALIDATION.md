@@ -68,3 +68,13 @@ python mcp/skills/_framework/benchmark_ocr_cache.py --activity fuben --output /t
 - 剑会操作说明、副本操作说明/skill、门派 skill、抓鬼 skill、`STARTUP.md`、`CREATOR.md`、`mcp/devices.toml.example`：移除旧拓扑要求或说明新缓存开关；文档与示例改动没有执行行为。
 
 新增代码集中在 `_framework/ocr_cache.py`，另附独立测试与离线比对工具。没有修改既有共享 OCR 实现 `vision.py`、MCP 工具实现、Rust/Flutter 或 Windows 启动工具；既有多显示器底层能力不在本次 skill 简化范围内。工作区原有改动保留。
+
+## 2026-10-10 分支整合与窗口数量规则
+
+`skills` 整合 `codex-control` 与远端 `patch/mhxy-skills` 的全部历史，并保存本地 Windows 诊断工具及说明。Skills 使用每台电脑一个连接、一个屏幕的配置；Bridge 底层多显示器支持、恢复修复、Windows 启动工具和控制端原型保留。
+
+门派每次选择一至两个队长；秘境是单人活动，至少一个账号窗口，不设固定窗口数量上限。窗口唯一名称、身份匹配、几何检查、遮挡拒绝和设备串行输入规则仍保留。新增回归覆盖门派拒绝三队长、秘境选择十二账号、运行器接受十二账号以及空列表和重复名称拒绝。
+
+验证：统一启动/缓存 26、门派 38、秘境 43、抓鬼 49、副本 57、剑会/Viewer 38、控制端 3，共 254 项测试通过；Bridge fleet 生命周期/恢复检查 56 项通过，测试进程已清理。44 个 Python 文件语法检查与 `git diff --check` 通过。剑会/Viewer 在允许本机 Vision 服务和 loopback 端口的环境复跑通过。本次未操作真实游戏，未重跑前述旧回放或活动完整 Mock E2E，不改变其已知失败结论；Windows 工具未在 Windows 实机重验。
+
+新增修改的回归面仅为 `_framework/window_targets.py` 的目标数量校验、`rustdesk-menpai/scripts/menpai.py` 与 `rustdesk-mijing/scripts/mijing.py` 的启动配置校验；三处必须同步才能使选择入口与实际运行器遵循同一数量规则。活动识别、状态机、计数和输入路径未重写。对应测试及 `STARTUP.md`、门派/秘境 `SKILL.md` 同步规则。与原 `codex-control` 相比，五个活动及新增启动/缓存能力采用今天的远端 Skills 实现；`src/bridge.rs`、`mcp/bridge_fleet.py`、`mcp/test_fleet.py` 和 `agent/control_plane/` 无额外改动，Windows 仅保存原有本地诊断增量。未升级子模块。

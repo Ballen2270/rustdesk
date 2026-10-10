@@ -215,6 +215,13 @@ class Validate(unittest.TestCase):
     def test_ok(self):
         validate(CFG, 20)
 
+    def test_leader_window_limits(self):
+        validate({**CFG, 'windows': CFG['windows'][:1]}, 20)
+        third = dict(CFG['windows'][0], name='third', device='pc3')
+        for windows in ([], CFG['windows']+[third]):
+            with self.assertRaisesRegex(ValueError, '1..2 leader windows'):
+                validate({**CFG, 'windows': windows}, 20)
+
     def test_rejects_uncalibrated(self):
         with self.assertRaises(ValueError):
             validate({**CFG, 'calibrated': False}, 20)

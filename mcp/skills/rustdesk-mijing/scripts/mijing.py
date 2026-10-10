@@ -212,8 +212,8 @@ def validate(cfg, rounds):
             or any(type(v) is not int or v < 1 for v in base_resolution)):
         raise ValueError('Invalid native_resolution')
     windows = cfg['windows']
-    if not 1 <= len(windows) <= 8 or len(set(w['name'] for w in windows)) != len(windows):
-        raise ValueError('Requires 1..8 windows with distinct names')
+    if not windows or len(set(w['name'] for w in windows)) != len(windows):
+        raise ValueError('Requires at least one account window with distinct names')
     rectangles = []
     for win in windows:
         rect = win.get('rect')
