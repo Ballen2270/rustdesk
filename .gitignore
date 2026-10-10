@@ -3,6 +3,7 @@
 .vscode
 .idea
 .DS_Store
+/images/
 .env
 libsciter-gtk.so
 src/ui/inline.rs
