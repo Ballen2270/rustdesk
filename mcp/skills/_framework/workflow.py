@@ -37,8 +37,10 @@ class Screen:
     color: str = ''
 
     def match(self, items):
-        if any(text_hits(items, t, b) for t, b in self.forbid):
-            return False
+        for e in self.forbid:
+            t, b, s = e if len(e) == 3 else (*e, DEFAULT_SCORE)
+            if text_hits(items, t, b, s):
+                return False
         for alt in self.any_of:
             hits = [e if len(e) == 3 else (*e, DEFAULT_SCORE) for e in alt]
             if all(text_hits(items, t, b, s) for t, b, s in hits):

@@ -32,6 +32,7 @@ from _framework.artifacts import event_logger, save, shot_name
 from _framework.humanize import ClickPlanner, ScrollPlanner
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr
+from _framework.window_targets import locate_targets
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node, Screen, Workflow,
                                  find_row_button, find_text, level_of)
 
@@ -343,6 +344,28 @@ async def run(args):
             raise RuntimeError('Crop resized or clipped')
         return img
 
+    async def capture_device(dev):
+        """Full-device frame at native resolution — miscalibration evidence."""
+        content = await call('screenshot', dev, format='png', max_width=2560)
+        blob = next(c.data for c in content if c.type == 'image')
+        return Image.open(io.BytesIO(base64.b64decode(blob))).convert('RGB')
+
+    saved_evidence = set()
+
+    async def save_alignment_evidence(dev, why):
+        """One full-desktop screenshot per device per run: the picture the
+        operator recalibrates window rects from. Best-effort only."""
+        if dev in saved_evidence:
+            return
+        saved_evidence.add(dev)
+        try:
+            full = await capture_device(dev)
+            name = f'misaligned-{dev}.png'
+            full.save(args.output/name)
+            event(device=dev, misaligned=name, reason=why)
+        except Exception:  # noqa: BLE001 — evidence is best-effort
+            pass
+
     async def humanized_scroll(win, box):
         anchor = (box[0]+box[2]/2, box[1]+box[3]/2)
         x0, y0, w, h = win['rect']
@@ -408,6 +431,7 @@ async def run(args):
     try:
         async with open_session(spec, repo, {'RUSTDESK_SCREENSHOT_DIR': ''}) as session:
             call = make_call(session, stopping)
+            await locate_targets(cfg, call, args.output, 'mijing')
             keep = lease_keeper(call, devices)
             summary['status'] = 'running'
             loop_index = 0
@@ -427,6 +451,7 @@ async def run(args):
                     if not s.get('initialized'):
                         if obs['state'] != 'normal':
                             s['paused'] = 'start requires the normal game screen; reconcile'
+                            await save_alignment_evidence(win_device(win), f'start state {obs["state"]}')
                         s['initialized'] = True
                     prior = s.get('seen')
                     s['seen'] = obs['state']

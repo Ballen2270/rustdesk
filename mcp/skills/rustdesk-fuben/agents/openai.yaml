@@ -1,0 +1,4 @@
+interface:
+  display_name: "双客户端副本"
+  short_description: "本地 OCR 脚本在 pc1 双客户端连刷侠士副本与两个普通副本，队长等待时自动到各队员设备点准备"
+  default_prompt: "使用 $rustdesk-fuben，在 pc1 已组队的两个客户端完成今天的侠士副本和两个普通副本。"

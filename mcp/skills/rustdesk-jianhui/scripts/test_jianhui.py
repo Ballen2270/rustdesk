@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from PIL import Image
+from PIL import Image, ImageDraw
 from jianhui import (advance, checkpoint, classify, close_retry_needed, configured_devices,
-                     recognize, shot_name, validate, SLOTS)
+                     merge_bands, recognize, shot_name, validate, DEFAULT_BANDS, SLOTS)
+from auto_layout import find_taskbar_frac, fuzzy_in, title_band_extent
 from local_features import BattleAnchors
 
 
@@ -172,6 +173,21 @@ class StateTests(unittest.TestCase):
         self.assertEqual(classify([cancel])['state'], 'unknown')
         self.assertEqual(classify([cancel, item('12', .1,.03)])['state'], 'unknown')
 
+    def test_half_screen_bands_relocate_regions(self):
+        # Two clients side by side on one display: button/ready marks sit at
+        # different relative positions than the full-screen defaults.
+        def item(text, x, y):
+            return dict(text=text, score=1, x=x, y=y, w=.02, h=.02)
+        bands = merge_bands(dict(bottom=[.78,.63,.22,.12], owner=[0,.40,1,.45]))
+        base = [item('甲的房间', .4,.03), item('房主', .865,.51), item('天梯匹配', .91,.68)]
+        self.assertEqual(classify(base, '甲', SLOTS, bands)['state'], 'room')
+        self.assertEqual(classify(base, '甲', SLOTS)['state'], 'unknown')  # defaults miss the button
+        self.assertIsNotNone(classify(base, '甲', SLOTS, bands)['button'])
+        with self.assertRaises(ValueError):
+            merge_bands(dict(nonexistent=[0,0,1,1]))
+        # partial override keeps the remaining default regions intact
+        self.assertEqual(merge_bands(dict(bottom=[0,.5,.2,.1]))['top'], (0, 0, 1, .30))
+
     def test_per_window_device_validation(self):
         base = dict(device='pc1', calibrated=True, native_resolution=[1920, 1080],
                     windows=[dict(name='left', rect=[0, 0, 800, 600], room_keyword='甲'),
@@ -277,6 +293,30 @@ class StateTests(unittest.TestCase):
                 (d/'state.json').write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):
                     checkpoint(SimpleNamespace(state=d/'state.json', out=out))
+
+
+class AutoLayoutTests(unittest.TestCase):
+    def test_fuzzy_in_tolerates_one_glyph(self):
+        self.assertTrue(fuzzy_in('雾上青天', '翼上青天的房间'))   # OCR misread
+        self.assertTrue(fuzzy_in('剑霜九洲', '剑霜九洲的房间'))
+        self.assertFalse(fuzzy_in('雾上青天', '剑箱九洲的房间'))
+        self.assertFalse(fuzzy_in('甲', '乙的房间'))
+
+    def test_title_band_extent_on_synthetic_bar(self):
+        img = Image.new('RGB', (400, 300), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([50, 10, 349, 30], fill=(240, 240, 240))
+        anchor = dict(x=.15, y=.066, w=.2, h=.026)
+        self.assertEqual(title_band_extent(img, 400, 300, anchor)[0], 50)
+        self.assertTrue(345 <= title_band_extent(img, 400, 300, anchor)[1] <= 350)
+        dark = dict(x=.15, y=.2, w=.2, h=.026)
+        self.assertIsNone(title_band_extent(img, 400, 300, dark))
+
+    def test_find_taskbar_frac_synthetic(self):
+        img = Image.new('RGB', (400, 300), (10, 10, 10))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 280, 400, 300], fill=(200, 200, 200))
+        self.assertTrue(.9 < find_taskbar_frac(img) < .97)
 
 
 if __name__ == '__main__':

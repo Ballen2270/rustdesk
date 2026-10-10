@@ -4,9 +4,10 @@
 # RUSTDESK_DEVICES_CONFIG=mcp/devices.toml in .mcp.json.
 #
 # Child TOMLs use the single-device format ([connection]/[video]/[ipc], see
-# bridge.toml.example). Each device's [ipc] port MUST equal its port here.
-# Every [[device]]'s config file must exist — delete the whole [[device]]
-# block for devices you have not configured yet, or startup fails.
+# bridge.toml.example). Each physical computer uses one device and one screen.
+# Each device's [ipc] port MUST equal its port here. Every [[device]]'s config
+# file must exist — delete the whole [[device]] block for devices you have not
+# configured yet, or startup fails.
 
 # Optional: bridge binary. Default: the RUSTDESK_BRIDGE_BIN env var.
 # bridge_bin = "target/release/bridge"
@@ -22,7 +23,7 @@ max_duration = 0                 # hard cap since spawn even if active; 0 = off;
 
 [[device]]
 name = "pc2"
-port = 21568
+port = 21570
 config = "mcp/devices/pc2.toml"
 idle_timeout = 600
 

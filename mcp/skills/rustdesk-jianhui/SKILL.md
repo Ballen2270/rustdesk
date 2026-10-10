@@ -9,9 +9,13 @@ description: 使用 RustDesk MCP 控制 pc1 上两个梦幻西游手游房主窗
 
 ## 开始前
 
+统一窗口清单、队长/账号选择和跨设备启动见 [统一启动](../STARTUP.md)。优先使用生成的目标配置；不含 `window_selection` 的旧配置仍按下述方式校准。不要为窗口位置、设备或轮数变化修改活动脚本。
+
+**每次启动第一件事：重新截图核对客户端位置（无需询问，直接做）。** 窗口位置会变，绝不沿用上一次的配置矩形——先抓每台设备全屏，确认每个配置窗口矩形内确实是游戏客户端，不符就重新校准再启动。runner 侧有同款机械守卫：首帧不是已准备画面会停机并把全屏截图存为运行目录的 `misaligned-<device>.png`，用它重新校准。
+
 设计、安装或校准不等于开始匹配。用户明确说开始/试跑之后才运行 `--execute`。用户指定试跑场数时遵从；否则默认十场。
 
-仓库：`/Users/yanjoy/codeWorkSpace/vscode/rustdesk`。解释器从仓库 `.mcp.json` 的 rustdesk.command 读取；当前是 `/opt/homebrew/Caskroom/miniconda/base/envs/rustdesk-mcp/bin/python`。
+仓库路径以当前 checkout 为准，通过 `--repo` 传入。解释器从仓库 `.mcp.json` 的 rustdesk.command 读取；当前是 `/opt/homebrew/Caskroom/miniconda/base/envs/rustdesk-mcp/bin/python`。
 
 先阅读 [运行说明](references/operation.md)。脚本 `scripts/jianhui.py` 自己连接仓库配置的 MCP stdio 服务，使用 screenshot/click/keep_alive，不直接绕过 MCP 发送输入。局部 OCR 在本地 Apple Vision 完成，图像特征在本地 Pillow 计算；运行循环没有在线模型请求。模型只负责启动校准、报告和无法自动核对的异常。
 

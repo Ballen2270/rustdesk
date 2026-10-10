@@ -22,29 +22,60 @@ from PIL import Image
 sys.path.append(str(Path(__file__).resolve().parents[2]))  # mcp/skills, for _framework
 from _framework.artifacts import save, shot_name
 from _framework.vision import BattleAnchors, green_label, ocr, region_ocr
+from _framework.window_targets import locate_targets
 
 SLOTS = [[.20, .65, .16, .15], [.37, .68, .16, .15],
          [.56, .65, .16, .15], [.75, .62, .17, .16]]
 
+# Recognition regions as fractions of the game-content rectangle. Defaults match
+# the original full-screen 1920x1080 window layout; a config "bands" mapping
+# (top-level or per window) overrides individual keys for other layouts, e.g.
+# two half-screen clients side by side on one display.
+DEFAULT_BANDS = {
+    'top': (0, 0, 1, .30),            # room title strip
+    'bottom': (.78, .89, .22, .11),   # 天梯匹配 / 取消匹配 button
+    'room_band': (0, .62, .98, .22),  # extra OCR strip once a room title is seen
+    'ready_y': (.62, .84),            # y range where raw 准备 marks may be normalized
+    'owner': (0, .5, 1, .4),          # 房主 / keyword confirmation strip
+    'panel_title': (.25, .05, .45, .2), 'panel_body': (.50, .15, .4, .15),
+    'result_title': (.3, .03, .4, .18), 'result_body': (.3, .75, .4, .2),
+    'kick_button': (.50, .52, .30, .18), 'kick_wait': (.24, .52, .26, .18),
+    'round': (.42, 0, .16, .12),      # battle round counter at the top
+    'battle_moves': (.55, .5, .45, .5), 'battle_attack': (.78, .80, .15, .2),
+    'battle_cancel': (.90, .80, .10, .2),
+    'modal': (.20, .30, .60, .42),    # kick-warning modal scan band
+}
 
-def classify(items, keyword='', slots=SLOTS):
+
+def merge_bands(overrides=None):
+    bands = dict(DEFAULT_BANDS)
+    if overrides:
+        unknown = set(overrides) - set(bands)
+        if unknown:
+            raise ValueError(f'Unknown band keys: {sorted(unknown)}')
+        bands.update({k: tuple(v) for k, v in overrides.items()})
+    return bands
+
+
+def classify(items, keyword='', slots=SLOTS, bands=None):
+    bands = bands or DEFAULT_BANDS
     def within(it, box):
         x, y, w, h = box
         return x <= it['x']+it['w']/2 <= x+w and y <= it['y']+it['h']/2 <= y+h
     def has(text, box):
         return any(text in it['text'] and within(it, box) and it['score'] >= .25 for it in items)
-    top = (0, 0, 1, .30)
-    bottom = (.78, .89, .22, .11)
-    panel = has('每周任务', (.25, .05, .45, .2)) and has('战斗历程', (.50, .15, .4, .15))
-    result = has('胜负结果', (.3, .03, .4, .18)) and has('数据统计', (.3, .75, .4, .2))
-    owner = has('房主', (0, .5, 1, .4)) or (bool(keyword) and has(keyword, (0, .5, 1, .4)))
+    top = bands['top']
+    bottom = bands['bottom']
+    panel = has('每周任务', bands['panel_title']) and has('战斗历程', bands['panel_body'])
+    result = has('胜负结果', bands['result_title']) and has('数据统计', bands['result_body'])
+    owner = has('房主', bands['owner']) or (bool(keyword) and has(keyword, bands['owner']))
     room = has('房间', top) and (not keyword or has(keyword, top)) and owner
     ready = [any(it['text'] == '准备' and it['score'] >= .35 and within(it, slot)
                  for it in items) for slot in slots]
     button = next((it for it in items if '天梯匹配' in it['text'] and within(it, bottom)), None)
-    kick_button = next((it for it in items if '开始匹配' in it['text'] and within(it, (.50, .52, .30, .18))), None)
-    kickwarn = kick_button is not None and has('我再等等', (.24, .52, .26, .18))
-    round_number = any(it['text'].isdigit() and within(it, (.42, 0, .16, .12)) for it in items)
+    kick_button = next((it for it in items if '开始匹配' in it['text'] and within(it, bands['kick_button'])), None)
+    kickwarn = kick_button is not None and has('我再等等', bands['kick_wait'])
+    round_number = any(it['text'].isdigit() and within(it, bands['round']) for it in items)
     if result:
         state = 'result'
     elif panel:
@@ -55,44 +86,46 @@ def classify(items, keyword='', slots=SLOTS):
         state = 'matching'
     elif room and button:
         state = 'ready' if all(ready) else 'room'
-    elif (sum(has(t, (.55, .5, .45, .5)) for t in ('法术', '攻击', '道具', '防御', '自动')) >= 3
-          or ((has('攻击', (.78, .80, .15, .2)) or round_number)
-              and has('取消', (.90, .80, .10, .2)))):
+    elif (sum(has(t, bands['battle_moves']) for t in ('法术', '攻击', '道具', '防御', '自动')) >= 3
+          or ((has('攻击', bands['battle_attack']) or round_number)
+              and has('取消', bands['battle_cancel']))):
         state = 'battle'
     else:
         state = 'unknown'
     return dict(state=state, ready=ready, button=kick_button if state == 'kickwarn' else button)
 
 
-def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False):
+def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=None):
+    bands = bands or DEFAULT_BANDS
     started = time.monotonic()
-    items = region_ocr(img, (0, 0, 1, .30))
+    items = region_ocr(img, bands['top'])
     items.extend(region_ocr(img, (0, .75, 1, .25)))
     source = 'roi_ocr'
     if any('房间' in it['text'] and it['y'] < .1 for it in items):
-        items.extend(region_ocr(img, (0, .62, .98, .22), 2))
-    obs = classify(items, keyword, slots)
+        items.extend(region_ocr(img, bands['room_band'], 2))
+    obs = classify(items, keyword, slots, bands)
     if obs['state'] in ('room', 'matching'):
         for ready, slot in zip(obs['ready'], slots):
             if not ready:
                 items.extend(region_ocr(img, slot, 3))
-        obs = classify(items, keyword, slots)
+        obs = classify(items, keyword, slots, bands)
+    ready_lo, ready_hi = bands['ready_y']
     for it in items:
-        if (.62 <= it['y'] < .84 and it['score'] >= .25
+        if (ready_lo <= it['y'] < ready_hi and it['score'] >= .25
                 and re.sub(r'[^\u4e00-\u9fff]', '', it['text']) == '准备'
                 and green_label(img, it)):
             it.update(raw_text=it['text'], raw_score=it['score'], text='准备', score=max(.5, it['score']), evidence='ocr+green_background')
-    obs = classify(items, keyword, slots)
+    obs = classify(items, keyword, slots, bands)
     if obs['state'] in ('room', 'ready'):
         # The kick-warning modal sits mid-screen; its band is only scanned there.
-        items.extend(region_ocr(img, (.20, .30, .60, .42), 2))
-        obs = classify(items, keyword, slots)
+        items.extend(region_ocr(img, bands['modal'], 2))
+        obs = classify(items, keyword, slots, bands)
     if obs['state'] == 'unknown':
-        items.extend(region_ocr(img, (.42, 0, .16, .12), 3))
-        obs = classify(items, keyword, slots)
+        items.extend(region_ocr(img, bands['round'], 3))
+        obs = classify(items, keyword, slots, bands)
     if obs['state'] == 'unknown':
         items.extend(ocr(img))
-        obs = classify(items, keyword, slots)
+        obs = classify(items, keyword, slots, bands)
         source = 'full_ocr_fallback'
     # Learned anchors can only maintain an already-confirmed battle, never start one.
     if obs['state'] == 'unknown' and active and anchors is not None and anchors.matches(img):
@@ -232,6 +265,24 @@ def validate(cfg, games):
     close = cfg.get('panel_close', [.907, .122])
     if len(close) != 2 or not all(0 < v < 1 for v in close):
         raise ValueError('Invalid panel close point')
+    for scope, bands in (('config', cfg.get('bands')), *(('window '+w['name'], w.get('bands')) for w in windows)):
+        if bands is None:
+            continue
+        if not isinstance(bands, dict):
+            raise ValueError(f'Invalid bands in {scope}')
+        unknown = set(bands) - set(DEFAULT_BANDS)
+        if unknown:
+            raise ValueError(f'Unknown band keys in {scope}: {sorted(unknown)}')
+        for key, value in bands.items():
+            if key == 'ready_y':
+                ok = (isinstance(value, list) and len(value) == 2
+                      and all(type(v) in (int, float) and 0 <= v <= 1 for v in value))
+            else:
+                ok = (isinstance(value, list) and len(value) == 4
+                      and all(type(v) in (int, float) and 0 <= v <= 1 for v in value)
+                      and value[2] > 0 and value[3] > 0)
+            if not ok:
+                raise ValueError(f'Invalid band {key} in {scope}')
 
 
 async def run(args):
@@ -306,6 +357,8 @@ async def run(args):
                         raise RuntimeError(str(result.content))
                     return result.content
 
+                await locate_targets(cfg, call, args.output, 'jianhui')
+
                 def win_device(win):
                     return win.get('device', cfg['device'])
 
@@ -323,11 +376,35 @@ async def run(args):
                     if img.size != (w, h):
                         raise RuntimeError('Crop resized or clipped')
                     return img
+
+                async def capture_device(dev):
+                    """Full-device frame at native resolution — miscalibration evidence."""
+                    content = await call('screenshot', dev, format='png', max_width=2560)
+                    blob = next(c.data for c in content if c.type == 'image')
+                    return Image.open(io.BytesIO(base64.b64decode(blob))).convert('RGB')
+
+                saved_evidence = set()
+
+                async def save_alignment_evidence(dev, why):
+                    """One full-desktop screenshot per device per run: the picture the
+                    operator recalibrates window rects from. Best-effort only."""
+                    if dev in saved_evidence:
+                        return
+                    saved_evidence.add(dev)
+                    try:
+                        full = await capture_device(dev)
+                        name = f'misaligned-{dev}.png'
+                        full.save(args.output/name)
+                        event(device=dev, misaligned=name, reason=why)
+                    except Exception:  # noqa: BLE001 — evidence is best-effort
+                        pass
                 devices = configured_devices(cfg)
                 last_frame: dict[str, float] = {}
                 lease = 0
                 loop_index = 0
                 anchors = [BattleAnchors() for _ in cfg['windows']]
+                win_slots = [w.get('ready_slots', cfg.get('ready_slots', SLOTS)) for w in cfg['windows']]
+                win_bands = [merge_bands(w.get('bands', cfg.get('bands'))) for w in cfg['windows']]
                 summary['status'] = 'running'
                 while not stopping():
                     loop_index += 1
@@ -342,10 +419,11 @@ async def run(args):
                             continue
                         img = await capture(win)
                         img.save(args.output/f"latest-{win['name']}.png")
-                        obs, items = await asyncio.to_thread(recognize, img, win['room_keyword'], win.get('ready_slots', cfg.get('ready_slots', SLOTS)), anchors[i], s.get('active', False))
+                        obs, items = await asyncio.to_thread(recognize, img, win['room_keyword'], win_slots[i], anchors[i], s.get('active', False), win_bands[i])
                         if not s.get('initialized'):
                             if obs['state'] not in ('room', 'ready', 'panel'):
                                 s['paused'] = 'start requires prepared room; reconcile ongoing match'
+                                await save_alignment_evidence(win_device(win), f'start state {obs["state"]}')
                             s['initialized'] = True
                         prior = s.get('seen')
                         had_pending = s.get('pending')
@@ -359,7 +437,7 @@ async def run(args):
                             retry_img = await capture(win)
                             retry_obs, _ = await asyncio.to_thread(
                                 recognize, retry_img, win['room_keyword'],
-                                win.get('ready_slots', cfg.get('ready_slots', SLOTS)))
+                                win_slots[i], None, False, win_bands[i])
                             if retry_obs['state'] == 'panel':
                                 s['close_esc'] = True
                                 s['sent'] = time.monotonic()
@@ -406,7 +484,7 @@ async def run(args):
                         if action and args.execute:
                             # Recheck the target immediately before any input, after other window work.
                             check_img = await capture(win)
-                            check, _ = await asyncio.to_thread(recognize, check_img, win['room_keyword'], win.get('ready_slots', cfg.get('ready_slots', SLOTS)))
+                            check, _ = await asyncio.to_thread(recognize, check_img, win['room_keyword'], win_slots[i], None, False, win_bands[i])
                             if check['state'] != obs['state']:
                                 event(window=win['name'], action_aborted=action, reason='state changed on recheck')
                             else:
