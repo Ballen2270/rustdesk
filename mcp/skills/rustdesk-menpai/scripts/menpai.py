@@ -35,6 +35,7 @@ from _framework.artifacts import event_logger, save, shot_name
 from _framework.humanize import ClickPlanner, ScrollPlanner
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr
+from _framework.window_targets import locate_targets
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node, Screen, Workflow,
                                  find_row_button, find_text)
 
@@ -193,6 +194,11 @@ def recognize(img, wf, anchors=None, active=False):
         items += region_ocr(img, MENU_OPTS, 2)
         state = wf.classify(items)
     if state == 'unknown':
+        # Icon-only battle toolbars (small windows): zoom the 取消 slot so its
+        # OCR confidence clears the battle_hits threshold.
+        items += region_ocr(img, CANCEL_BOX, 2)
+        state = wf.classify(items)
+    if state == 'unknown':
         items += ocr(img)
         state = wf.classify(items)
         source = 'full_ocr_fallback'
@@ -312,6 +318,32 @@ def resolve_viewer():
     return None
 
 
+class StaleFrame(RuntimeError):
+    pass
+
+
+def require_fresh_frame(note):
+    if not re.search(r'\bstale=False\b', note) or not re.search(r'\bframe_seq=\d+\b', note):
+        raise StaleFrame('No new decoded frame; current game state is unconfirmed')
+
+
+def hold_for_frame(s, now):
+    s.setdefault('frame_wait_since', now)
+    s['seen'] = 'stale'
+    s['observation'] = dict(state='stale', source='transport')
+    s['warning'] = 'No new decoded frame; recognition and inputs withheld'
+    s.pop('done_since', None)
+
+
+def resume_after_frame(s, now):
+    since = s.pop('frame_wait_since', None)
+    if since is not None:
+        for key in ('sent', 'init_since', 'unknown_since'):
+            if key in s:
+                s[key] += now-since
+        s.pop('warning', None)
+
+
 async def run(args):
     cfg = json.loads(args.config.read_text())
     rounds = args.rounds if args.rounds > 0 else cfg.get('rounds', 20)
@@ -376,8 +408,10 @@ async def run(args):
         x, y, w, h = win['rect']
         res = win.get('native_resolution', cfg['native_resolution'])
         content = await call('screenshot', win_device(win), format='png', max_width=2560,
-                             crop_x=x, crop_y=y, crop_w=w, crop_h=h)
+                             crop_x=x, crop_y=y, crop_w=w, crop_h=h,
+                             wait_for_new_frame=True)
         note = ' '.join(c.text for c in content if c.type == 'text')
+        require_fresh_frame(note)
         dims = re.search(r'native_resolution=(\d+)x(\d+)', note)
         if not dims or list(map(int, dims.groups())) != res:
             raise RuntimeError('Resolution changed; recalibration required')
@@ -415,9 +449,11 @@ async def run(args):
         anchor = (box[0]+box[2]/2, box[1]+box[3]/2)
         x0, y0, w, h = win['rect']
         if scroller is None:
+            await capture(win)
             await call('scroll', win_device(win), x=x0+round(anchor[0]*w), y=y0+round(anchor[1]*h), dy=3)
             return
         for x, y, dy, pause in scroller.segment(anchor, 1, (w, h)):
+            await capture(win)
             await call('scroll', win_device(win), x=x0+x, y=y0+y, dy=dy)
             await asyncio.sleep(min(pause, .5))
 
@@ -476,6 +512,7 @@ async def run(args):
     try:
         async with open_session(spec, repo, {'RUSTDESK_SCREENSHOT_DIR': ''}) as session:
             call = make_call(session, stopping)
+            await locate_targets(cfg, call, args.output, 'menpai')
             keep = lease_keeper(call, devices)
             summary['status'] = 'running'
             loop_index = 0
@@ -487,7 +524,14 @@ async def run(args):
                     s = states[i]
                     if s.get('paused') or s.get('ended') or s['count'] >= rounds:
                         continue
-                    img = await capture(win)
+                    try:
+                        img = await capture(win)
+                    except StaleFrame:
+                        if 'frame_wait_since' not in s:
+                            event(window=win['name'], warning='No new decoded frame; inputs withheld')
+                        hold_for_frame(s, time.monotonic())
+                        continue
+                    resume_after_frame(s, time.monotonic())
                     img.save(args.output/f"latest-{win['name']}.png")
                     obs, items = await asyncio.to_thread(
                         recognize, img, wf, anchors[i], s.get('active', False))
@@ -578,7 +622,13 @@ async def run(args):
                         if (not s.get('paused') and not s.get('ended') and not s.get('pending')
                                 and obs['state'] != 'unknown' and s['count'] < rounds
                                 and s.get('initialized') and candidates):
-                            action = await execute_node(candidates[0], win, s, obs)
+                            try:
+                                action = await execute_node(candidates[0], win, s, obs)
+                            except StaleFrame:
+                                hold_for_frame(s, time.monotonic())
+                                event(window=win['name'], action_aborted=candidates[0].id,
+                                      reason='No new decoded frame on input recheck')
+                                continue
                     elif candidates:
                         action = candidates[0].id
 

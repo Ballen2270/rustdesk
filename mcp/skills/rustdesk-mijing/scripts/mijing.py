@@ -32,6 +32,7 @@ from _framework.artifacts import event_logger, save, shot_name
 from _framework.humanize import ClickPlanner, ScrollPlanner
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr
+from _framework.window_targets import locate_targets
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node, Screen, Workflow,
                                  find_row_button, find_text, level_of)
 
@@ -430,6 +431,7 @@ async def run(args):
     try:
         async with open_session(spec, repo, {'RUSTDESK_SCREENSHOT_DIR': ''}) as session:
             call = make_call(session, stopping)
+            await locate_targets(cfg, call, args.output, 'mijing')
             keep = lease_keeper(call, devices)
             summary['status'] = 'running'
             loop_index = 0

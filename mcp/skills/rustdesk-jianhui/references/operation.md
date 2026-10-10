@@ -12,6 +12,17 @@ inspect 可加 `--rect x,y,w,h`,指定**游戏内容**矩形;省略时将整张�
 
 ready_slots 可以放在每个 windows 条目内,优先于顶层默认值。它们必须排除该队房主所在槽位;房主站位和队长站位可能不同。当前 MCP SDK 使用 CallToolResult.is_error 字段。
 
+`bands`(顶层或每窗口)覆盖识别区域的归一化矩形,缺省值等于全屏 1920x1080 单窗口布局(DEFAULT_BANDS,见 jianhui.py)。窗口不是全屏时(如两客户端并排一块屏、2x2 四窗)所有相对位置都会偏移,必须按实测覆盖;键含 top/bottom/room_band/ready_y/owner/panel_*/result_*/kick_*/round/battle_*/modal。2026-10-04 pc1 半屏并排实测(两窗各约 958x1008,矩形含下方叠窗冗余但无害):`bottom=[0.78,0.63,0.22,0.12], room_band=[0,0.42,0.98,0.32], ready_y=[0.42,0.62], owner=[0,0.40,1,0.45], battle_cancel=[0.75,0.58,0.25,0.42]`,弹窗类(panel/result/kick)放宽亦可用;完整文件见当日运行配置。kickwarn 与 match 点击竞态会让 pending 卡死自 pause,但游戏倒计时会自行开始匹配,接管时用 active 按实况标注即可。
+
+## 自动布局校准(全本地,无云端模型)
+
+```sh
+$PY $REPO/mcp/skills/rustdesk-jianhui/scripts/auto_layout.py --repo $REPO --keyword 雾上青天 --keyword 剑霜九洲 --out /private/tmp/jianhui-pc1.json
+# 或离线:$PY .../auto_layout.py --image 全屏图.png --native 1920x1080 --keyword 甲 --keyword 乙 [--expect-windows 4]
+```
+
+一张全屏帧自动出整套配置:窗口标题 OCR 锚点→标题栏白带/列边缘定窗口矩形(切掉 Windows 标题栏,底部到任务栏/下一排窗口),每窗 OCR 实测天梯匹配按钮、成员名字行、房主标记(标记缺失时按房主名字模糊定位),生成 rect/ready_slots/bands 并通过 validate 自检;窗口纵横比偏离常见 4:3 会在 warnings 提示核对;两窗重叠(面积>15%)直接拒绝并提示先平铺。关键词匹配容忍 1 字 OCR 误读(≥3 字才模糊)。识别管线(Apple Vision OCR + Pillow 像素)全部本地,运行循环零在线请求。注意:真重叠(窗口盖窗口)像素上无解,必须先平铺;下采样 JPEG 会丢小字标题,优先 live 原生截图;剑会房间界面元素最全,不在房间时 slots 测不到,工具会警告。2x2 四窗的实测验证待下次真机。
+
 ```sh
 # 只观察,运行目录必须为新目录;这里显式限制为两分钟
 $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/jianhui.py run --repo $REPO --config /private/tmp/jianhui-pc1.json --output /private/tmp/jianhui-observe --minutes 2
@@ -70,10 +81,6 @@ $PY $REPO/mcp/skills/rustdesk-jianhui/scripts/replay.py --images $REPO/images
 ```
 
 回放核对六张单窗口图的状态、准备槽与模板对其他界面的误匹配,并输出本地识别耗时。这不包含 MCP 传输时间,不等同于实机端到端性能。首次试跑仍先短暂 observe,校准通过后再 execute。
-
-## 多显示器
-
-宿主(如 pc1)有多台显示器时,一台显示器一条 bridge 连接:`devices.toml` 里每个 `pc1dN` 一个 `[[device]]` 块(独立端口),子 TOML `mcp/devices/pc1dN.toml` 用 pc1 的凭据加一行顶层 `display = N`(0 基,必须位于任何 `[section]` 之前);bridge 在视频流通后自动切屏。窗口条目用 `"device": "pc1dN"` 指定所属显示器,不同显示器分辨率不同时用窗口级 `native_resolution` 覆盖。每连接只流一块屏,鼠标坐标是屏内坐标;runner 的窗口串行循环保证不抢全局光标。`{"cmd":"display","index":N}` 可对运行中的 bridge 手动切屏。
 
 ## 离线测试套件
 

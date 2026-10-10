@@ -1,0 +1,4 @@
+interface:
+  display_name: "双客户端抓鬼"
+  short_description: "用本地 OCR 脚本在 pc1 双客户端重复抓鬼，独立计轮并按点数规划双倍"
+  default_prompt: "使用 $rustdesk-zhuagui，在 pc1 已组队的两个客户端各完成五轮单倍抓鬼。"

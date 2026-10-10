@@ -38,14 +38,16 @@ def load_scenario(path):
     data['native'] = tuple(data.get('native', [2400, 900]))
     data.setdefault('window_split', data['native'][0]//2)
     data.setdefault('start_state', {})
+    data.setdefault('devices', {})   # name -> {native, window_split, start_state}
     return data
 
 
 class WindowState:
-    def __init__(self, scenario, name):
+    def __init__(self, scenario, name, start=None):
         self.scenario = scenario
         self.name = name
-        self.state = scenario['start_state'].get(name, next(iter(scenario['states'])))
+        starts = scenario['start_state'] if start is None else start
+        self.state = starts.get(name.rsplit(':', 1)[-1], next(iter(scenario['states'])))
         self.entered_at = time.monotonic()
         self.pending = None       # (state, visible_at)
         self.auto_left = {}       # rule index -> remaining count
@@ -119,13 +121,24 @@ scenario = load_scenario(_scenario_env) if _scenario_env else None  # --scenario
 CLICKS = os.environ.get('RUSTDESK_MOCK_CLICKS', '')
 WINDOWS: dict[str, WindowState] = {}
 _last_crop: dict[str, tuple] = {}  # window -> (crop_x, crop_y, crop_w, crop_h)
+_last_full: dict[str, bool] = {}   # device -> last screenshot was a full frame
 _seq = 0
 
 server = MCPServer(name='rustdesk-mock', version='0.1.0')
 
 
-def window_for(x):
-    return 'left' if x < scenario['window_split'] else 'right'
+def window_for(device, x=0):
+    """Left/right window within a device's own split."""
+    spec = (scenario or {}).get('devices', {}).get(device) or {}
+    return 'left' if x < spec.get('window_split', scenario['window_split']) else 'right'
+
+
+def window_key(device, x=0):
+    """State-namespace key: devices declared in scenario['devices'] keep
+    their own window states; undeclared devices share the legacy left/right
+    pair exactly as before."""
+    win = window_for(device, x)
+    return f'{device}:{win}' if device in scenario['devices'] else win
 
 
 def serve(state: WindowState, size):
@@ -154,12 +167,31 @@ async def screenshot(device: str = 'pc1', wait_for_new_frame: bool = False,
     """Scripted screenshot: current state image resized to the crop."""
     global _seq
     _seq += 1
-    win = window_for(crop_x or 0)
-    ws = WINDOWS.setdefault(win, WindowState(scenario, win))
-    size = (crop_w or 1200, crop_h or 900)
+    dspec = scenario['devices'].get(device)
+    # A no-crop request on a device with a fullframe_state serves the whole
+    # desktop composite (single-connection layouts: the member sweep reads
+    # the full frame while leader windows use their own cropped states).
+    full = (crop_x is None and crop_w is None and crop_h is None
+            and dspec and 'fullframe_state' in dspec)
+    _last_full[device] = bool(full)
+    if full:
+        win = f'{device}:full'
+        ws = WINDOWS.setdefault(win, WindowState(
+            scenario, 'full', start={'full': dspec['fullframe_state']}))
+    else:
+        win = window_key(device, crop_x or 0)
+        ws = WINDOWS.setdefault(win, WindowState(
+            scenario, win, start=(dspec or {}).get('start_state')))
+    if crop_w or crop_h:
+        size = (crop_w or 1200, crop_h or 900)
+    elif dspec and 'native' in dspec:
+        size = tuple(dspec['native'])   # full-frame requests use the device's own native
+    else:
+        size = (1200, 900)
     _last_crop[win] = (crop_x or 0, crop_y or 0, size[0], size[1])
     data = serve(ws, size)
-    note = (f'native_resolution={scenario["native"][0]}x{scenario["native"][1]} '
+    native = tuple(dspec['native']) if dspec and 'native' in dspec else scenario['native']
+    note = (f'native_resolution={native[0]}x{native[1]} '
             f'image={size[0]}x{size[1]} frame_seq={_seq} stale=False mock={ws.visible}')
     return [Image(data=data, format='png'), note]
 
@@ -168,8 +200,13 @@ async def screenshot(device: str = 'pc1', wait_for_new_frame: bool = False,
 async def click(device: str = 'pc1', x: int = 0, y: int = 0, button: str = 'left',
                 double: bool = False, humanize: bool = True) -> str:
     """Resolve the click against the scenario and drive the state machine."""
-    win = window_for(x)
-    ws = WINDOWS.setdefault(win, WindowState(scenario, win))
+    if _last_full.get(device):
+        win = f'{device}:full'
+    else:
+        win = window_key(device, x)
+    ws = WINDOWS.setdefault(win, WindowState(
+        scenario, win.rsplit(':', 1)[-1],
+        start=(scenario['devices'].get(device) or {}).get('start_state')))
     cx, cy, cw, ch = _last_crop.get(win, (0, 0, scenario['native'][0], scenario['native'][1]))
     nx, ny = (x-cx)/cw, (y-cy)/ch  # normalized within the last-served crop
     clicked, nxt = ws.click(nx, ny)
@@ -181,7 +218,7 @@ async def click(device: str = 'pc1', x: int = 0, y: int = 0, button: str = 'left
 @server.tool()
 async def scroll(device: str = 'pc1', x: int = 0, y: int = 0, dy: int = 0, dx: int = 0) -> str:
     """Recorded, no effect on the scenario (lists are visible by default)."""
-    win = window_for(x)
+    win = window_key(device, x)
     record(win, 'scroll', x, y, extra=f'dy={dy}')
     return f'scrolled ({dx}, {dy}) at ({x}, {y})'
 

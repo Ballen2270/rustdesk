@@ -10,7 +10,8 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 from menpai import (MENU_OPTS, TASK_BOX, MenpaiWorkflow, battle_hits, bookkeep,
-                    build_screens, build_workflow, task_n_of, validate)
+                    build_screens, build_workflow, task_n_of, validate, StaleFrame,
+                    require_fresh_frame, hold_for_frame, resume_after_frame)
 
 
 def item(text, x, y, score=.9):
@@ -258,6 +259,28 @@ class Nodes(unittest.TestCase):
         self.assertIn('protector_menu', w.nodes['goto_protector'].expect)
         self.assertIn('claim_menu', w.nodes['reclaim_loop'].expect)
         self.assertIn('task_protector', w.nodes['claim_task'].expect)
+
+
+class FrameFreshness(unittest.TestCase):
+    def test_stale_and_missing_metadata_rejected(self):
+        for note in ('frame_seq=15 stale=True', 'frame_seq=15', 'stale=False', ''):
+            with self.assertRaises(StaleFrame):
+                require_fresh_frame(note)
+        require_fresh_frame('frame_seq=16 stale=False')
+
+    def test_stale_does_not_confirm_pending_or_end_activity(self):
+        s = dict(pending='goto_protector', sent=10, done_since=12, count=3)
+        hold_for_frame(s, 15)
+        hold_for_frame(s, 20)
+        self.assertEqual(s['frame_wait_since'], 15)
+        self.assertEqual(s['seen'], 'stale')
+        self.assertEqual(s['pending'], 'goto_protector')
+        self.assertEqual(s['count'], 3)
+        self.assertNotIn('done_since', s)
+        resume_after_frame(s, 25)
+        self.assertEqual(s['sent'], 20)
+        self.assertNotIn('warning', s)
+        self.assertNotIn('frame_wait_since', s)
 
 
 if __name__ == '__main__':
