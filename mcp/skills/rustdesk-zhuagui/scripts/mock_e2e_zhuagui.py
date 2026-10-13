@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPTS = Path(__file__).resolve().parent
@@ -23,6 +23,7 @@ FRAMEWORK = ROOT/'mcp/skills/_framework'
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rounds', type=int, choices=(1, 2), default=2)
+    parser.add_argument('--resume-task', action='store_true')
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='zhuagui-e2e-'))
     images = work/'images'
@@ -53,6 +54,25 @@ def main():
         scenario['states'][f'fight{i}'] = dict(image='5.png')
         scenario['auto'].append({'from': f'fight{i}', 'after': 1.2,
                                  'to': f'fight{i+1}' if i < 11 else 'done'})
+    if args.resume_task:
+        cfg['native_resolution'] = [1600, 650]
+        for win in cfg['windows']:
+            win['rect'][1] = 30
+        desktop = Image.new('RGB', (1600, 650), (15, 45, 130))
+        draw = ImageDraw.Draw(desktop)
+        font = ImageFont.truetype('/System/Library/Fonts/STHeiti Medium.ttc', 16)
+        for x, source in ((0, '3.png'), (800, '2.png')):
+            draw.rectangle((x, 0, x+759, 29), fill='white')
+            draw.text((x+20, 3), '梦幻西游：时空', font=font, fill='black')
+            with Image.open(images/source) as image:
+                desktop.paste(image.resize((760, 570)), (x, 30))
+        desktop.save(images/'desktop.png')
+        scenario['native'] = [1600, 650]
+        scenario['start_state']['left'] = 'task'
+        scenario['devices'] = dict(pc1=dict(native=[1600, 650],
+                                           start_state=scenario['start_state'],
+                                           window_split=800, fullframe_state='desktop'))
+        scenario['states']['desktop'] = dict(image='desktop.png')
     # Both windows exercise an 11-fight chain. Policy unit tests also cover ten.
     (work/'config.json').write_text(json.dumps(cfg))
     (work/'scenario.json').write_text(json.dumps(scenario))
@@ -80,7 +100,8 @@ def main():
     events = [json.loads(line) for line in (work/'run/events.jsonl').read_text().splitlines()]
     for name in ('left', 'right'):
         actions = [e['sent'] for e in events if e.get('window') == name and 'sent' in e]
-        assert actions.count('claim_task') == args.rounds, actions
+        expected_claims = args.rounds-int(args.resume_task and name == 'left')
+        assert actions.count('claim_task') == expected_claims, actions
         assert actions.count('continue_round') == args.rounds-1, actions
         if args.rounds == 2:
             ended = next(e for e in events if e.get('window') == name

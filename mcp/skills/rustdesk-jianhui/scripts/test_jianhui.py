@@ -113,6 +113,25 @@ class StateTests(unittest.TestCase):
         self.feed(s, 'result', 2100)
         self.assertEqual(s['count'], 1)
 
+    def test_close_panel_can_reveal_battle_without_losing_result(self):
+        s = {'count': 0, 'active': False, 'pending': 'close', 'sent': 0}
+        advance(s, {'state': 'battle'}, 21, 10)
+        advance(s, {'state': 'battle'}, 22, 10)
+        self.assertNotIn('pending', s)
+        self.assertNotIn('paused', s)
+        self.assertTrue(s['active'])
+        advance(s, {'state': 'result'}, 23, 10)
+        advance(s, {'state': 'result'}, 24, 10)
+        self.assertEqual(s['count'], 1)
+
+    def test_close_panel_result_does_not_invent_unobserved_battle(self):
+        s = {'count': 0, 'active': False, 'pending': 'close', 'sent': 0}
+        advance(s, {'state': 'result'}, 21, 10)
+        advance(s, {'state': 'result'}, 22, 10)
+        self.assertNotIn('pending', s)
+        self.assertNotIn('paused', s)
+        self.assertEqual(s['count'], 0)
+
     def test_unknown_does_not_hide_unconfirmed_input(self):
         s = {'count': 0, 'pending': 'match', 'sent': 1}
         self.feed(s, 'unknown', 30)
@@ -261,6 +280,42 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(self.feed(s, 'matching', 12))
         self.assertNotIn('pending', s)
         self.assertNotIn('paused', s)
+
+    def test_kick_warning_redirects_blocked_background_click_once(self):
+        s = {'count': 0, 'pending': 'match', 'sent': 1}
+        self.assertEqual(self.feed(s, 'kickwarn', 3), 'rematch')
+        s.update(pending='rematch', sent=5)
+        self.assertIsNone(self.feed(s, 'kickwarn', 7))
+        self.assertIsNone(self.feed(s, 'ready', 10))
+        self.assertEqual(s['pending'], 'rematch')
+        self.assertIsNone(self.feed(s, 'ready', 30))
+        self.assertIn('paused', s)
+        self.assertEqual(s['count'], 0)
+
+    def test_fallback_room_rescans_ready_slots_and_modal(self):
+        def item(text, x, y):
+            return dict(text=text, score=1, x=x, y=y, w=.02, h=.02)
+        base = [item('甲的房间', .4, .03), item('房主', .1, .7), item('天梯匹配', .85, .94)]
+        dialog = [item('倒计时：4秒', .45, .51), item('我再等等', .33, .59),
+                  item('开始匹配', .58, .59)]
+        def scan(img, box, scale=1):
+            if box in SLOTS:
+                return [item('准备', box[0]+.04, box[1]+.04)]
+            return dialog if box == DEFAULT_BANDS['modal'] else []
+        with patch('jianhui.region_ocr', side_effect=scan), patch('jianhui.ocr', return_value=base):
+            obs, _ = recognize(Image.new('RGB', (648, 487)), '甲')
+        self.assertEqual(obs['state'], 'kickwarn')
+        self.assertEqual(obs['ready'], [True]*4)
+        self.assertEqual(obs['button']['text'], '开始匹配')
+
+    def test_pc1_pc3_have_independent_local_coordinates(self):
+        cfg = dict(device='pc1', calibrated=True, native_resolution=[1920, 1080],
+                   windows=[dict(name='pc1-leader', device='pc1', rect=[8, 31, 648, 487],
+                                 room_keyword='甲'),
+                            dict(name='pc3-leader', device='pc3', rect=[8, 31, 648, 487],
+                                 room_keyword='乙')])
+        validate(cfg, 10)
+        self.assertEqual(configured_devices(cfg), ['pc1', 'pc3'])
 
     def test_kick_warning_during_active_battle_pauses(self):
         s = {'count': 0}

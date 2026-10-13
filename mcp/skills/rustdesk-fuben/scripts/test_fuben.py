@@ -24,6 +24,32 @@ def obs(state, pos=None):
 
 
 class Policy(unittest.TestCase):
+    def test_pending_battle_confirmation_keeps_active_for_unknown(self):
+        self.s.update(run_open=True, entering='knight')
+        begin_action(self.s, 'dialog_confirm', 0)
+        self.step('battle', 1)
+        self.assertNotIn('pending', self.s)
+        self.assertTrue(self.s['active'] and self.s['battle_seen'])
+        for t in (2, 35, 1000):
+            self.assertIsNone(self.step('unknown', t))
+        self.assertNotIn('dismiss_tries', self.s)
+        self.assertNotIn('paused', self.s)
+        self.assertIn('warning', self.s)
+
+    def test_battle_unknown_does_not_right_click_but_map_overlay_can(self):
+        self.s.update(run_open=True, entering='knight')
+        self.step('battle', 0)
+        self.step('unknown', 1)
+        self.assertIsNone(self.step('unknown', 33))
+        self.step('dungeon_map', 34)
+        self.step('unknown', 35)
+        self.assertEqual(self.step('unknown', 66), 'dismiss_overlay')
+
+    def test_activity_timeout_does_not_right_click_active_battle(self):
+        begin_action(self.s, 'open_activity', 0)
+        self.assertIsNone(self.step('battle', 21))
+        self.assertTrue(self.s['active'])
+
     def setUp(self):
         self.wf = build_workflow(CFG)
         self.s = make_state(2, 2)

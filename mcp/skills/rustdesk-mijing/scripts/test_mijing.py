@@ -210,6 +210,16 @@ class BookkeepTests(unittest.TestCase):
     """Pause-don't-guess anomalies from the Codex review: failed level
     replays and unearned cleared screens must reconcile, not retry."""
 
+    def test_battle_unknown_keeps_waiting_without_a_close_node(self):
+        s = dict(count=0, active=False, battle_seen=False)
+        bookkeep(s, dict(state='battle'), 0, {})
+        for t in (1, 60, 1000):
+            bookkeep(s, dict(state='unknown'), t, {})
+            self.assertEqual(list(build_workflow(dict(activity_button=[.2, 0, .1, .1])).nodes_for('unknown')), [])
+        self.assertTrue(s['active'])
+        self.assertEqual(s['count'], 0)
+        self.assertNotIn('paused', s)
+
     def fresh(self):
         return dict(count=0, active=False, battle_seen=False, inst_since=None,
                     inst_level=None, seen=None, pre_battle_level=None)

@@ -74,7 +74,8 @@ def classify(items, keyword='', slots=SLOTS, bands=None):
                  for it in items) for slot in slots]
     button = next((it for it in items if '天梯匹配' in it['text'] and within(it, bottom)), None)
     kick_button = next((it for it in items if '开始匹配' in it['text'] and within(it, bands['kick_button'])), None)
-    kickwarn = kick_button is not None and has('我再等等', bands['kick_wait'])
+    kickwarn = (room and kick_button is not None and kick_button['score'] >= .35
+                and has('我再等等', bands['kick_wait']) and has('倒计时', bands['modal']))
     round_number = any(it['text'].isdigit() and within(it, bands['round']) for it in items)
     if result:
         state = 'result'
@@ -101,10 +102,13 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=No
     items = region_ocr(img, bands['top'])
     items.extend(region_ocr(img, (0, .75, 1, .25)))
     source = 'roi_ocr'
+    modal_scanned = False
+    ready_scanned = False
     if any('房间' in it['text'] and it['y'] < .1 for it in items):
         items.extend(region_ocr(img, bands['room_band'], 2))
     obs = classify(items, keyword, slots, bands)
     if obs['state'] in ('room', 'matching'):
+        ready_scanned = True
         for ready, slot in zip(obs['ready'], slots):
             if not ready:
                 items.extend(region_ocr(img, slot, 3))
@@ -119,6 +123,7 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=No
     if obs['state'] in ('room', 'ready'):
         # The kick-warning modal sits mid-screen; its band is only scanned there.
         items.extend(region_ocr(img, bands['modal'], 2))
+        modal_scanned = True
         obs = classify(items, keyword, slots, bands)
     if obs['state'] == 'unknown':
         items.extend(region_ocr(img, bands['round'], 3))
@@ -127,6 +132,20 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=No
         items.extend(ocr(img))
         obs = classify(items, keyword, slots, bands)
         source = 'full_ocr_fallback'
+    if obs['state'] in ('room', 'ready'):
+        if not all(obs['ready']) and not ready_scanned:
+            for ready, slot in zip(obs['ready'], slots):
+                if not ready:
+                    items.extend(region_ocr(img, slot, 3))
+            for it in items:
+                if (ready_lo <= it['y'] < ready_hi and it['score'] >= .25
+                        and re.sub(r'[^\u4e00-\u9fff]', '', it['text']) == '准备'
+                        and green_label(img, it)):
+                    it.update(raw_text=it['text'], raw_score=it['score'], text='准备',
+                              score=max(.5, it['score']), evidence='ocr+green_background')
+        if not modal_scanned:
+            items.extend(region_ocr(img, bands['modal'], 2))
+        obs = classify(items, keyword, slots, bands)
     # Learned anchors can only maintain an already-confirmed battle, never start one.
     if obs['state'] == 'unknown' and active and anchors is not None and anchors.matches(img):
         obs['state'] = 'battle'
@@ -162,9 +181,11 @@ def advance(s, obs, now, target, room_timeout=90):
     if pending:
         if pending == 'match' and state in ('matching', 'battle'):
             s.pop('pending', None)
-        elif pending == 'close' and state in ('room', 'ready'):
+        elif pending == 'match' and state == 'kickwarn':
             s.pop('pending', None)
-        elif pending == 'rematch' and state in ('matching', 'battle', 'room', 'ready', 'panel'):
+        elif pending == 'close' and state in ('room', 'ready', 'matching', 'battle', 'result'):
+            s.pop('pending', None)
+        elif pending == 'rematch' and state in ('matching', 'battle'):
             s.pop('pending', None)
         elif now-s['sent'] > 20:
             s['paused'] = 'action not confirmed: '+pending
@@ -421,7 +442,7 @@ async def run(args):
                         img.save(args.output/f"latest-{win['name']}.png")
                         obs, items = await asyncio.to_thread(recognize, img, win['room_keyword'], win_slots[i], anchors[i], s.get('active', False), win_bands[i])
                         if not s.get('initialized'):
-                            if obs['state'] not in ('room', 'ready', 'panel'):
+                            if obs['state'] not in ('room', 'ready', 'panel', 'kickwarn'):
                                 s['paused'] = 'start requires prepared room; reconcile ongoing match'
                                 await save_alignment_evidence(win_device(win), f'start state {obs["state"]}')
                             s['initialized'] = True
@@ -456,7 +477,7 @@ async def run(args):
                                       observed=retry_obs['state'])
                         if s.get('active') and obs['state'] == 'battle' and obs['source'] != 'local_battle_anchors':
                             anchors[i].learn(img)
-                        if obs['state'] in ('room', 'ready', 'result', 'panel'):
+                        if obs['state'] in ('room', 'ready', 'result', 'panel', 'kickwarn'):
                             anchors[i] = BattleAnchors()
                         s['observation'] = obs
                         save(args.output/f"recognition-{win['name']}.json", dict(observation=obs, items=items, warning=s.get('warning')))

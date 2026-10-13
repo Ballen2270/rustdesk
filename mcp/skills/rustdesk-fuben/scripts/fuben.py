@@ -552,6 +552,11 @@ def advance(s, obs, items, now, wf, cfg, execute=True, rng=None):
         if moved or s.get('position') is None:
             s['pos_since'] = now
         s['position'] = pos
+    if state == 'battle':
+        s['active'] = True
+        s['battle_seen'] = True
+    elif state != 'unknown':
+        s['active'] = False
     pending = s.get('pending')
     if pending:
         node = wf.nodes[pending]
@@ -580,7 +585,8 @@ def advance(s, obs, items, now, wf, cfg, execute=True, rng=None):
                 s.pop('sent', None)
                 return pending
         elif now-s['sent'] > node.timeout:
-            if pending in ('open_activity', 'select_daily') and s.get('nav_fails', 0) < 3:
+            if (pending in ('open_activity', 'select_daily') and s.get('nav_fails', 0) < 3
+                    and state != 'battle' and not s.get('active')):
                 # An overlay swallowed the click (leaderboard, bag…): close it
                 # with a right-click, then line up again.
                 s['nav_fails'] = s.get('nav_fails', 0)+1
@@ -629,7 +635,7 @@ def advance(s, obs, items, now, wf, cfg, execute=True, rng=None):
             s['warning'] = 'unknown screen; inputs withheld'
         # A stray panel (leaderboard, bag, …) that nothing drives: right-click
         # closes most game overlays — try it instead of stalling forever.
-        if now-s['unknown_since'] > cfg.get('overlay_grace', 30):
+        if now-s['unknown_since'] > cfg.get('overlay_grace', 30) and not s.get('active'):
             if s.get('dismiss_tries', 0) >= cfg.get('max_dismiss_retries', 5):
                 s['paused'] = 'unknown screen not closable by right-click'
                 return None

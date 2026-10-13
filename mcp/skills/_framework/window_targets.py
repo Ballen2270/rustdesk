@@ -21,8 +21,10 @@ from PIL import Image
 
 if __package__:
     from .vision import region_ocr, text_hits
+    from .window_geometry import measure_title_windows
 else:
     from vision import region_ocr, text_hits
+    from window_geometry import measure_title_windows
 
 ACTIVITIES = ('zhuagui', 'fuben', 'menpai', 'mijing', 'jianhui')
 
@@ -60,9 +62,19 @@ def overlaps(a, b):
             and max(a[1], b[1]) < min(a[1]+a[3], b[1]+b[3]))
 
 
+def minor_overlap(a, b):
+    width = max(0, min(a[0]+a[2], b[0]+b[2])-max(a[0], b[0]))
+    height = max(0, min(a[1]+a[3], b[1]+b[3])-max(a[1], b[1]))
+    return (width > 0 and height > 0
+            and width*height <= .02*min(a[2]*a[3], b[2]*b[3])
+            and (width <= .02*min(a[2], b[2])
+                 or height <= .02*min(a[3], b[3])))
+
+
 def require_uncovered(window, inventory):
     for other in inventory['windows']:
-        if other['id'] != window['id'] and overlaps(window['rect'], other['rect']):
+        if (other['id'] != window['id'] and overlaps(window['rect'], other['rect'])
+                and not minor_overlap(window['rect'], other['rect'])):
             raise ValueError('Tile overlapping windows before selecting '+inventory['device']+':'+window['id'])
 
 
@@ -218,11 +230,24 @@ def layout_detector():
 
 
 def discover_windows(image, device):
+    measured = None
     try:
-        rects, _ = layout_detector()(image, image.width, image.height, 1)
+        rects, items = layout_detector()(image, image.width, image.height, 1)
     except SystemExit as error:
-        raise ValueError('Window discovery failed: '+str(error)) from error
+        items = region_ocr(image, [0, 0, 1, 1], 2)
+        measured = measure_title_windows(image, items)
+        if measured is None:
+            raise ValueError('Window discovery failed: '+str(error)) from error
+        rects = measured
     candidates = []
+    native = measure_title_windows(image, items) if items and measured is None else None
+    if (any(min(r[2:]) < 300 or not 1.15 <= r[2]/r[3] <= 1.55 for r in rects)
+            or native is not None and sorted(native) != sorted(rects)):
+        if items:
+            items = items+region_ocr(image, [0, 0, 1, 1], 2)
+        measured = measure_title_windows(image, items)
+        if measured is not None:
+            rects = measured
     for rect in sorted(rects, key=lambda r: (r[1], r[0])):
         x, y, w, h = rect
         if (min(x, y) < 0 or min(w, h) < 300 or x+w > image.width or y+h > image.height
@@ -232,6 +257,9 @@ def discover_windows(image, device):
         items = region_ocr(crop, [0, 0, 1, .15], 2)
         topbar = (text_hits(items, '活动', [0, 0, 1, .15], .5)
                   and any(text_hits(items, t, [0, 0, 1, .15], .5) for t in ('排行', '指引')))
+        if measured is not None:
+            topbar = sum(bool(text_hits(items, t, [0, 0, 1, .15], .5))
+                         for t in ('活动', '排行', '指引')) >= 2
         room = any('的房间' in it['text'] and it['score'] >= .5 for it in items)
         if not topbar and not room:
             raise ValueError('No independent game/room anchor in candidate '+str(rect))

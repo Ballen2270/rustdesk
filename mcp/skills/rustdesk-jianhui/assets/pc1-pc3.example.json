@@ -1,0 +1,12 @@
+{
+  "device": "pc1",
+  "calibrated": false,
+  "native_resolution": [1920, 1080],
+  "initial_counts": [0, 0],
+  "windows": [
+    {"name": "pc1-leader", "device": "pc1", "rect": [0, 0, 0, 0], "native_resolution": [1920, 1080], "room_keyword": "待校准"},
+    {"name": "pc3-leader", "device": "pc3", "rect": [0, 0, 0, 0], "native_resolution": [1920, 1080], "room_keyword": "待校准"}
+  ],
+  "ready_slots": [[0.20, 0.65, 0.16, 0.15], [0.37, 0.68, 0.16, 0.15], [0.56, 0.65, 0.16, 0.15], [0.75, 0.62, 0.17, 0.16]],
+  "panel_close": [0.907, 0.122]
+}

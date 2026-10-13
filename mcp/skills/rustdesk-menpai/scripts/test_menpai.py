@@ -130,6 +130,16 @@ class BattleHits(unittest.TestCase):
 
 
 class Bookkeep(unittest.TestCase):
+    def test_battle_unknown_keeps_waiting_without_a_close_node(self):
+        s = self.base()
+        bookkeep(s, dict(state='battle'), 0, {})
+        for t in (1, 60, 1000):
+            bookkeep(s, dict(state='unknown'), t, {})
+            self.assertEqual(list(build_workflow(CFG).nodes_for('unknown')), [])
+        self.assertTrue(s['active'])
+        self.assertEqual(s['count'], 0)
+        self.assertNotIn('paused', s)
+
     def base(self):
         return dict(count=0, active=False, battle_seen=False, chain=False,
                     task_n=None, task_total=None, ended=None)

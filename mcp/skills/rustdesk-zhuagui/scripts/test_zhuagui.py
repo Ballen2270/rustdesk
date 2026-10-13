@@ -159,6 +159,48 @@ class Policy(unittest.TestCase):
         self.assertTrue(s['round_open'] and s['battle_seen'] and s['initialized'])
         self.assertEqual(s['recovered'], 'adopted_open_round')
 
+    def test_midtask_adoption_does_not_authorize_fixed_click(self):
+        s = make_state(1)
+        self.assertIsNone(advance(s, obs('task', 1, [98, 98]), 0, self.wf, CFG))
+        self.assertNotIn('paused', s)
+        self.assertTrue(s['initialized'] and s['round_open'])
+        self.assertFalse(s.get('anchored'))
+        self.assertFalse(s.get('dialog_pending'))
+        advance(s, obs('task', 1, [98, 98]), 2, self.wf, CFG)
+        self.assertEqual(advance(s, obs('task', 1, [98, 98]), 10, self.wf, CFG), 'goto_ghost')
+
+    def test_unowned_round_done_does_not_anchor_or_continue(self):
+        s = make_state(1)
+        advance(s, obs('round_done'), 0, self.wf, CFG)
+        self.assertTrue(s['initialized'])
+        self.assertFalse(s.get('anchored'))
+        self.assertIsNone(advance(s, obs('round_done'), 100, self.wf, CFG))
+        self.assertEqual(s['count'], 0)
+
+    def test_recovered_dialog_waits_while_already_navigating(self):
+        s = make_state(1)
+        s.update(anchored=True, dialog_pending=True, recovery_dialog=True)
+        for t, pos in ((0, [98, 98]), (2, [97, 98]), (6, [96, 98])):
+            self.assertIsNone(advance(s, obs('task', 1, pos), t, self.wf, CFG))
+        self.assertEqual(advance(s, obs('task', 1, [96, 98]), 10, self.wf, CFG), 'dismiss_dialog')
+        begin_action(s, 'dismiss_dialog', 10)
+        self.assertFalse(s.get('recovery_dialog'))
+
+    def test_dismiss_overlay_round_end_preserves_ownership(self):
+        s = make_state(2)
+        s['initialized'] = True
+        begin_action(s, 'dismiss_overlay', 0)
+        advance(s, obs('round_done'), 1, self.wf, CFG)
+        self.assertNotIn('pending', s)
+        self.assertEqual(s['count'], 0)
+        self.claimed()
+        self.step('battle', 1)
+        begin_action(self.s, 'dismiss_overlay', 2)
+        self.step('round_done', 3)
+        self.step('round_done', 4)
+        self.assertNotIn('pending', self.s)
+        self.assertEqual(self.s['count'], 1)
+
     def test_midbattle_observe_allowed_without_input_or_count(self):
         s = make_state(1)
         advance(s, obs('battle'), 0, self.wf, CFG, execute=False)
@@ -214,6 +256,33 @@ class Policy(unittest.TestCase):
         self.assertIsNone(self.step('unknown', 3))
         self.assertIsNone(self.step('unknown', 30))
         self.assertIn('warning', self.s)
+        self.assertNotIn('paused', self.s)
+
+    def test_unknown_streak_in_active_battle_never_right_clicks(self):
+        # Live failure 2026-10-12 19:44: at low video quality a fight
+        # flickered battle↔unknown past the 30s overlay grace; the right-
+        # click sent into the running fight could not confirm on the
+        # returning battle frames and paused a healthy window.
+        self.claimed()
+        self.step('battle', 3)
+        for t in (20, 30, 40, 51, 55, 60, 70, 79):
+            self.assertIsNone(self.step('unknown', t), t)
+        self.assertIn('warning', self.s)
+        self.assertNotIn('dismiss_tries', self.s)
+        self.assertNotIn('paused', self.s)
+        # fight ends → gate reopens: a later stray overlay is right-clicked
+        self.step('round_done', 85)
+        self.assertIsNone(self.step('unknown', 90))
+        self.assertIsNone(self.step('unknown', 120))
+        self.assertEqual(self.step('unknown', 121), 'dismiss_overlay')
+
+    def test_dismiss_overlay_confirms_when_battle_revealed(self):
+        # An overlay covering a fight: the right-click removes it and the
+        # first battle frame confirms the dismissal instead of timing out.
+        self.claimed()
+        begin_action(self.s, 'dismiss_overlay', 30)
+        self.step('battle', 31)
+        self.assertNotIn('pending', self.s)
         self.assertNotIn('paused', self.s)
 
     def test_nav_waits_for_auto_movement(self):

@@ -28,6 +28,7 @@ from _framework.ocr_cache import RegionOCRCache
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr, text_hits
 from _framework.window_targets import locate_targets
+from _framework.window_geometry import measure_title_windows
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node,
                                  Screen, Workflow, find_text)
 
@@ -149,7 +150,11 @@ def build_workflow(cfg):
         Node('dismiss_insufficient', 'insufficient_popup', ClickText('取消', POPUP_CANCEL),
              ['task', 'battle', 'claim_menu', 'normal', 'unknown'], 20),
         Node('dismiss_overlay', 'unknown', ClickPoint(DIALOG_TAP),
-             ['normal', 'activity_panel', 'claim_menu', 'task', 'unknown'], 20),
+             # battle/round_done confirm too: a covered fight revealed by the
+             # right-click is a successful dismissal, not a timeout (live
+             # failure 2026-10-12 19:44 paused a healthy window this way).
+             ['normal', 'activity_panel', 'claim_menu', 'task', 'battle',
+              'round_done', 'unknown'], 20),
     ])
 
 
@@ -319,6 +324,7 @@ def begin_action(s, action, now):
         s['daily_selected'] = False
     elif action == 'dismiss_dialog':
         s.pop('dialog_pending', None)
+        s.pop('recovery_dialog', None)
     elif action == 'claim_task':
         s.update(round_open=True, round_counted=False, battle_seen=False,
                  task_n=None, nav_attempts=0, task_since=now)
@@ -331,6 +337,44 @@ def begin_action(s, action, now):
         s['nav_position'] = s.get('position')
     elif action == 'continue_round':
         s['continuing'] = True
+
+
+def recovery_dialog_visible(items):
+    return (text_hits(items, '钟馗', (0, .90, .4, .1), .5)
+            and any(len(it['text']) >= 8
+                    and text_hits([it], it['text'], (.25, .80, .75, .18), .5)
+                    for it in items))
+
+
+def read_recovery_dialog(image):
+    for scale in (2, 3):
+        if recovery_dialog_visible(region_ocr(image, [0, .78, 1, .22], scale)):
+            return True
+    name = region_ocr(image, [0, .90, .4, .1], 3)
+    if not text_hits(name, '钟馗', (0, .90, .4, .1), .5):
+        return False
+    body = region_ocr(image, [.25, .80, .75, .18], 2)
+    return recovery_dialog_visible(name+body)
+
+
+async def recovery_window_aligned(win, call, cfg):
+    content = await call('screenshot', win.get('device', cfg['device']),
+                         format='png', max_width=2560, wait_for_new_frame=True)
+    note = ' '.join(c.text for c in content if c.type == 'text')
+    dims = re.search(r'native_resolution=(\d+)x(\d+)', note)
+    blob = next((c.data for c in content if c.type == 'image'), None)
+    if dims is None or blob is None or 'stale=False' not in note:
+        return False
+    with Image.open(io.BytesIO(base64.b64decode(blob))) as source:
+        image = source.convert('RGB')
+    if image.size != tuple(map(int, dims.groups())):
+        return False
+    items = await asyncio.to_thread(region_ocr, image, [0, 0, 1, 1], 2)
+    rects = await asyncio.to_thread(measure_title_windows, image, items)
+    if rects is None:
+        return False
+    return sum(max(abs(a-b) for a, b in zip(rect, win['rect'])) <= 8
+               for rect in rects) == 1
 
 
 def advance(s, obs, now, wf, cfg, execute=True, rng=None):
@@ -406,7 +450,8 @@ def advance(s, obs, now, wf, cfg, execute=True, rng=None):
             if pending == 'goto_ghost':
                 s['nav_at'] = now
         elif now-s['sent'] > node.timeout:
-            if pending in ('open_activity', 'select_daily') and s.get('nav_fails', 0) < 3:
+            if (pending in ('open_activity', 'select_daily') and s.get('nav_fails', 0) < 3
+                    and state not in ('battle', 'round_done') and not s.get('active')):
                 # An overlay swallowed the click (leaderboard, bag…): close it
                 # with a right-click, then line up again.
                 s['nav_fails'] = s.get('nav_fails', 0)+1
@@ -458,7 +503,12 @@ def advance(s, obs, now, wf, cfg, execute=True, rng=None):
             s['warning'] = 'unknown screen; inputs withheld'
         # A stray panel (leaderboard, bag, …) that nothing drives: right-click
         # closes most game overlays — try it instead of stalling forever.
-        if now-s['unknown_since'] > cfg.get('overlay_grace', 30):
+        # But never while a fight may still be running ('active'): at low
+        # video quality a battle flickers battle↔unknown past the grace and
+        # a right-click sent into it cannot confirm — it pauses the window
+        # (live failure 2026-10-12 19:44). active clears as soon as a
+        # task/normal frame proves the fight is over.
+        if now-s['unknown_since'] > cfg.get('overlay_grace', 30) and not s.get('active'):
             if s.get('dismiss_tries', 0) >= cfg.get('max_dismiss_retries', 5):
                 s['paused'] = 'unknown screen not closable by right-click'
                 return None
@@ -503,6 +553,8 @@ def advance(s, obs, now, wf, cfg, execute=True, rng=None):
     if state == 'task' and s['round_open']:
         s.setdefault('task_since', now)
         if s.get('dialog_pending'):
+            if s.get('recovery_dialog') and moved:
+                return None
             # Freshly claimed: tap a neutral scene spot to close the NPC
             # dialog, then let the normal navigation logic take over.
             if s['streak'] >= 2 and now-s['task_since'] >= cfg.get('navigation_delay', 3):
@@ -717,6 +769,14 @@ async def run(args):
         if check['state'] != obs['state']:
             event(window=win['name'], action_aborted=action, observed=check['state'])
             return
+        if action == 'dismiss_dialog' and s.get('recovery_dialog'):
+            if not await asyncio.to_thread(read_recovery_dialog, image):
+                s.pop('dialog_pending', None)
+                s.pop('recovery_dialog', None)
+                return
+            if (check['map_position'] is not None and obs['map_position'] is not None
+                    and check['map_position'] != obs['map_position']):
+                return
         if action == 'goto_ghost':
             if check['task_n'] != obs['task_n'] or (check['map_position'] is not None and obs['map_position'] is not None and check['map_position'] != obs['map_position']):
                 event(window=win['name'], action_aborted=action, reason='task changed or already moving')
@@ -779,6 +839,13 @@ async def run(args):
             after.save(args.output/shot_name(win['name'], action+'-after'))
             return
         moved_image = await capture(win)
+        if action == 'dismiss_dialog' and s.get('recovery_dialog'):
+            moved_check, _ = await asyncio.to_thread(recognize, moved_image, wf, cache=cache)
+            if (moved_check['state'] != check['state']
+                    or not await asyncio.to_thread(read_recovery_dialog, moved_image)
+                    or (moved_check['map_position'] is not None and check['map_position'] is not None
+                        and moved_check['map_position'] != check['map_position'])):
+                return
         if not fixed:
             moved_obs, moved_items = await asyncio.to_thread(recognize, moved_image, wf, cache=cache)
             moved_item = (row_button(moved_items)[1] if action == 'join_entry'
@@ -841,11 +908,26 @@ async def run(args):
                             image = await capture(win)
                             image.save(args.output/f"latest-{win['name']}.png")
                             obs, items = await asyncio.to_thread(recognize, image, wf, anchors[i], s['active'], cache=caches[i])
+                            if not s.get('anchored') and obs['state'] in ('task', 'battle', 'round_done'):
+                                if await recovery_window_aligned(win, call, cfg):
+                                    s['anchored'] = True
+                                else:
+                                    s['paused'] = 'recovery window boundary not verified; recalibrate rectangle'
+                            if (args.execute and not s['initialized'] and obs['state'] == 'task'
+                                    and s.get('anchored') and not s.get('paused')):
+                                if await asyncio.to_thread(read_recovery_dialog, image):
+                                    s.update(dialog_pending=True, recovery_dialog=True)
                             if not s.get('anchored') and obs['state'] in ('normal', 'activity_panel', 'claim_menu'):
                                 panel_anchor = (obs['state'] == 'activity_panel'
                                                 and text_hits(items, '日常活动', TABS)
                                                 and text_hits(items, '活动', (.28, .07, .4, .11)))
-                                if not panel_anchor and not any(text_hits(items, t, TOP) for t in ('活动', '排行', '指引')):
+                                # The claim menu is a fullscreen dialog that hides the
+                                # top bar; its header match is itself rect proof, so a
+                                # window resumed on the menu can anchor instead of
+                                # pausing forever on a bar it cannot see.
+                                menu_anchor = (obs['state'] == 'claim_menu'
+                                               and text_hits(items, '捉鬼任务', MENU_FIRST))
+                                if not panel_anchor and not menu_anchor and not any(text_hits(items, t, TOP) for t in ('活动', '排行', '指引')):
                                     s['paused'] = 'no game top-bar anchor; recalibrate rectangle'
                                 else:
                                     s['anchored'] = True

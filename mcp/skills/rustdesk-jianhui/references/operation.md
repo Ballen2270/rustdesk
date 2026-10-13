@@ -14,6 +14,16 @@ ready_slots 可以放在每个 windows 条目内,优先于顶层默认值。它�
 
 `bands`(顶层或每窗口)覆盖识别区域的归一化矩形,缺省值等于全屏 1920x1080 单窗口布局(DEFAULT_BANDS,见 jianhui.py)。窗口不是全屏时(如两客户端并排一块屏、2x2 四窗)所有相对位置都会偏移,必须按实测覆盖;键含 top/bottom/room_band/ready_y/owner/panel_*/result_*/kick_*/round/battle_*/modal。2026-10-04 pc1 半屏并排实测(两窗各约 958x1008,矩形含下方叠窗冗余但无害):`bottom=[0.78,0.63,0.22,0.12], room_band=[0,0.42,0.98,0.32], ready_y=[0.42,0.62], owner=[0,0.40,1,0.45], battle_cancel=[0.75,0.58,0.25,0.42]`,弹窗类(panel/result/kick)放宽亦可用;完整文件见当日运行配置。kickwarn 与 match 点击竞态会让 pending 卡死自 pause,但游戏倒计时会自行开始匹配,接管时用 active 按实况标注即可。
 
+## pc1、pc3 各一队
+
+使用 `assets/pc1-pc3.example.json`。每个 windows 条目设置自己的 device 和 native_resolution，坐标属于该设备；同坐标在不同设备不冲突。每台五个账号只选房主，其余四个不发输入。准备槽按实际房主站位校准，不假定房主是队长或第一张卡。
+
+只读扫描：`python mcp/skills/_framework/window_targets.py scan --repo "$PWD" --device pc1 --device pc3 --output /private/tmp/jianhui-scan`。其他活动的战斗画面不能证明剑会房主身份；2FA 未通过、窗口被遮挡、房间未就绪时如实报告识别限制，不开始匹配。
+
+离线双设备弹窗验证：`python mcp/skills/rustdesk-jianhui/scripts/mock_e2e.py --devices pc1 pc3 --kickwarn`。显式绑定 mock MCP，验证弹窗按钮点击、匹配确认和独立计数，不连接真机。
+
+弹窗点击以匹配/战斗为确认条件；返回普通房间不视作匹配成功。若背景匹配点击之后观察到踢出警告，可在新帧复核后转为一次弹窗“开始匹配”，未确认则暂停核对。
+
 ## 自动布局校准(全本地,无云端模型)
 
 ```sh

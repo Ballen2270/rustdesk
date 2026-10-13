@@ -8,6 +8,7 @@ run directory through viewer.py and checks its API. Exit code 0 = pass.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -32,11 +33,20 @@ def check(results, ok, label, detail=''):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--devices', nargs=2)
+    parser.add_argument('--kickwarn', action='store_true')
+    args = parser.parse_args()
+    windows = [dict(w) for w in WINDOWS]
+    if args.devices:
+        for win, device in zip(windows, args.devices):
+            win.update(device=device, rect=[0, 0, 1150, 880])
+    action = 'rematch' if args.kickwarn else 'match'
     base = Path(tempfile.mkdtemp(prefix='jianhui-e2e-'))
     out = base/'run'
     clicks = base/'clicks.jsonl'
     cfg = dict(device='pc1', calibrated=True, native_resolution=[2400, 900],
-               initial_counts=[0, 0], windows=WINDOWS,
+               initial_counts=[0, 0], windows=windows,
                ready_slots=[[.20, .65, .16, .15], [.37, .68, .16, .15],
                             [.56, .65, .16, .15], [.75, .62, .17, .16]],
                panel_close=[.907, .122])
@@ -47,6 +57,10 @@ def main():
                  JIANHUI_MOCK_CLICKS=str(clicks),
                  JIANHUI_MOCK_NATIVE='2400x900',
                  JIANHUI_MOCK_RIGHT_OFFSET='2'))))
+    if args.devices:
+        spec['mcpServers']['rustdesk']['env']['JIANHUI_MOCK_DEVICES'] = ','.join(args.devices)
+    if args.kickwarn:
+        spec['mcpServers']['rustdesk']['env']['JIANHUI_MOCK_KICKWARN'] = '1'
     (base/'spec.json').write_text(json.dumps(spec))
     print(f'e2e base: {base}\nlaunching runner (1 scripted game per window, ~60s)…')
     proc = subprocess.Popen(
@@ -93,24 +107,27 @@ def main():
         if (out/'events.jsonl').exists() else []
     check(results, len(timeline) >= 8, 'timeline has per-loop samples', f'{len(timeline)} lines')
     for win in ('left', 'right'):
-        check(results, any(e.get('window') == win and e.get('action') == 'match' for e in timeline),
+        check(results, any(e.get('window') == win and e.get('action') == action for e in timeline),
               f'{win}: match action recorded in timeline')
-        check(results, any(e.get('window') == win and e.get('confirmed') == 'match' for e in timeline),
+        check(results, any(e.get('window') == win and e.get('confirmed') == action for e in timeline),
               f'{win}: match confirmation recorded in timeline')
         before = next((e.get('before') for e in events
-                       if e.get('window') == win and e.get('intent') == 'match'), None)
+                       if e.get('window') == win and e.get('intent') == action), None)
         check(results, bool(before) and (out/before).exists(), f'{win}: before-shot exists', str(before))
         after = next((e.get('after') for e in events
-                      if e.get('window') == win and e.get('confirmed') == 'match'), None)
+                      if e.get('window') == win and e.get('confirmed') == action), None)
         check(results, bool(after) and (out/after).exists(), f'{win}: after-shot exists', str(after))
         check(results, (out/f'latest-{win}.png').exists(), f'{win}: latest frame exists')
-        check(results, any(p.name.endswith(f'-{win}-ready.png') or p.name.endswith(f'-{win}-matching.png')
+        check(results, any(p.name.endswith(f'-{win}-ready.png') or p.name.endswith(f'-{win}-kickwarn.png') or p.name.endswith(f'-{win}-matching.png')
                            for p in out.glob('*.png')), f'{win}: evidence frame exists')
 
     mock_clicks = [json.loads(l) for l in clicks.read_text().splitlines()] if clicks.exists() else []
     for win in ('left', 'right'):
-        check(results, any(c.get('window') == win and c.get('action') == 'match' for c in mock_clicks),
+        check(results, any(c.get('window') == win and c.get('action') == action for c in mock_clicks),
               f'{win}: match click reached the mock')
+    if args.devices:
+        check(results, {c['device'] for c in mock_clicks} == set(args.devices),
+              'inputs reached only the two configured devices')
 
     print('viewer checks (offline replay of the finished run)…')
     viewer = subprocess.Popen([PY, str(SKILL/'viewer.py'), '--run-dir', str(out),

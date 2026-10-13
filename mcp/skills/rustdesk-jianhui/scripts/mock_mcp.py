@@ -25,6 +25,8 @@ IMAGES = Path(os.environ.get('JIANHUI_MOCK_IMAGES', 'images'))
 CLICKS = os.environ.get('JIANHUI_MOCK_CLICKS', '')
 NATIVE = tuple(int(v) for v in os.environ.get('JIANHUI_MOCK_NATIVE', '2400x900').split('x'))
 RIGHT_OFFSET = float(os.environ.get('JIANHUI_MOCK_RIGHT_OFFSET', '2'))
+DEVICES = os.environ.get('JIANHUI_MOCK_DEVICES', '').split(',')
+KICKWARN = os.environ.get('JIANHUI_MOCK_KICKWARN') == '1'
 START = time.monotonic()
 
 SLOTS = [[.20, .65, .16, .15], [.37, .68, .16, .15], [.56, .65, .16, .15], [.75, .62, .17, .16]]
@@ -32,6 +34,7 @@ LOBBY_ROOM = '匹配界面单个.png'
 # (image, seconds) after a match click; falls back to the lobby room afterwards.
 GAME = [('匹配中.png', 6), ('匹配成功.png', 4), ('战斗ing.png', 8), ('战斗失败.png', 8)]
 READY = '·synthetic-ready·'  # lobby room with slot-0's 准备 mark copied into slots 1/2
+WARNING = '长时间未开始匹配会被踢出房间需要点击开始匹配.png'
 
 server = MCPServer(name='jianhui-mock', version='0.1.0')
 
@@ -72,7 +75,9 @@ def _png(name, size):
     return _png_cache[key]
 
 
-def _window(crop_x):
+def _window(crop_x, device='pc1'):
+    if len(DEVICES) == 2:
+        return 'left' if device == DEVICES[0] else 'right'
     return 'left' if (crop_x or 0) < NATIVE[0]/2 else 'right'
 
 
@@ -86,14 +91,14 @@ def _scenario_name(window):
             elapsed -= duration
         return LOBBY_ROOM  # game over; back to the lobby
     t = time.monotonic()-START-(RIGHT_OFFSET if window == 'right' else 0)
-    return LOBBY_ROOM if t < 6 else READY
+    return LOBBY_ROOM if t < 6 else WARNING if KICKWARN else READY
 
 
-def _record(window, x, y, action):
+def _record(window, x, y, action, device):
     if not CLICKS:
         return
     with open(CLICKS, 'a') as f:
-        f.write(json.dumps(dict(time=time.time(), window=window, x=x, y=y, action=action))+'\n')
+        f.write(json.dumps(dict(time=time.time(), window=window, x=x, y=y, action=action, device=device))+'\n')
 
 
 @server.tool(structured_output=False)
@@ -104,7 +109,7 @@ async def screenshot(device: str = 'pc1', wait_for_new_frame: bool = False,
     """Scripted screenshot: reference image resized to the requested crop."""
     global _seq
     _seq += 1
-    window = _window(crop_x)
+    window = _window(crop_x, device)
     name = _scenario_name(window)
     size = (crop_w or 1200, crop_h or 900)
     data = _png(name, size)
@@ -117,16 +122,19 @@ async def screenshot(device: str = 'pc1', wait_for_new_frame: bool = False,
 async def click(device: str = 'pc1', x: int = 0, y: int = 0, button: str = 'left',
                 double: bool = False, humanize: bool = True) -> str:
     """Record the click and drive the scenario: match on the ready screen."""
-    window = _window(x)
+    window = _window(x, device)
     name = _scenario_name(window)
-    if name == READY:
+    if name == WARNING and .50 <= x/1150 <= .80 and .52 <= y/880 <= .70:
+        _game_start[window] = time.monotonic()
+        action = 'rematch'
+    elif name == READY:
         _game_start[window] = time.monotonic()
         action = 'match'
     elif name == '结算完成界面.png':
         action = 'close'
     else:
         action = 'observe'
-    _record(window, x, y, action)
+    _record(window, x, y, action, device)
     return f'clicked {button} at ({x}, {y}) mock window={window} action={action}'
 
 
