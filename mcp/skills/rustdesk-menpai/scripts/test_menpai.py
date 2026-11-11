@@ -8,10 +8,14 @@ import sys
 from pathlib import Path
 import unittest
 
+from PIL import Image
+
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from menpai import (MENU_OPTS, TASK_BOX, MenpaiWorkflow, battle_hits, bookkeep,
-                    build_screens, build_workflow, task_n_of, validate, StaleFrame,
-                    require_fresh_frame, hold_for_frame, resume_after_frame)
+from menpai import (MENU_OPTS, TASK_BOX, MenpaiWorkflow, OCCLUSION_MASK, battle_hits,
+                    bookkeep, build_screens, build_workflow, clamp_box, mask_strips,
+                    occlusion_summary, occlusion_violations, point_in_strips, task_n_of,
+                    validate, StaleFrame, require_fresh_frame, hold_for_frame,
+                    resume_after_frame)
 
 
 def item(text, x, y, score=.9):
@@ -266,16 +270,63 @@ class Nodes(unittest.TestCase):
         self.assertEqual(w.nodes_for('battle'), [])
         self.assertEqual(w.nodes_for('unknown'), [])
 
-    def test_long_navigation_timeouts(self):
+    def test_action_timeouts_are_capped_at_20_seconds(self):
         w = build_workflow(CFG)
-        self.assertGreaterEqual(w.nodes['goto_protector'].timeout, 120)
-        self.assertGreaterEqual(w.nodes['reclaim_loop'].timeout, 120)
+        self.assertTrue(w.nodes)
+        self.assertLessEqual(max(node.timeout for node in w.nodes.values()), 20)
 
     def test_expect_targets(self):
         w = build_workflow(CFG)
         self.assertIn('protector_menu', w.nodes['goto_protector'].expect)
         self.assertIn('claim_menu', w.nodes['reclaim_loop'].expect)
         self.assertIn('task_protector', w.nodes['claim_task'].expect)
+
+
+class Occlusion(unittest.TestCase):
+    RIGHT_STRIP = [(.98, 0, .02, 1)]   # right-top neighbor over the task panel edge
+
+    def test_clamp_box_moves_target_off_edge_strips(self):
+        x, y, w, h = clamp_box((.9, .15, .1, .05), self.RIGHT_STRIP)
+        self.assertAlmostEqual(x+w, .98)
+        self.assertAlmostEqual(w, .08)
+        x, y, w, h = clamp_box((0, .5, .2, .1), [(0, 0, .02, 1)])
+        self.assertAlmostEqual(x, .02)
+        self.assertAlmostEqual(w, .18)
+
+    def test_clamp_box_interior_target_untouched(self):
+        self.assertEqual(clamp_box((.3, .5, .1, .05), self.RIGHT_STRIP), (.3, .5, .1, .05))
+
+    def test_clamp_box_fully_covered_target_collapses(self):
+        self.assertLessEqual(clamp_box((.9, .15, .1, .05), [(.8, 0, .25, 1)])[2], 0)
+
+    def test_point_in_strips(self):
+        self.assertTrue(point_in_strips(.99, .5, self.RIGHT_STRIP))
+        self.assertFalse(point_in_strips(.5, .5, self.RIGHT_STRIP))
+        self.assertFalse(point_in_strips(.5, .5, []))
+
+    def test_mask_strips_paints_only_covered_pixels(self):
+        img = Image.new('RGB', (1000, 750), (10, 20, 30))
+        mask_strips(img, self.RIGHT_STRIP)
+        self.assertEqual(img.getpixel((500, 375)), (10, 20, 30))
+        self.assertEqual(img.getpixel((995, 10)), OCCLUSION_MASK)
+        self.assertEqual(img.getpixel((970, 10)), (10, 20, 30))
+
+    def test_summary_reports_band_coverage_and_refusal_threshold(self):
+        cfg = dict(device='pc1', windows=[dict(name='w1', device='pc1',
+                                               occlusion=[list(s) for s in self.RIGHT_STRIP])])
+        report = occlusion_summary(cfg)
+        # strip covers the right 2% of the window → 2%·0.24/0.072 of the task band
+        self.assertAlmostEqual(report[0]['covered']['task_panel'], .0667, places=3)
+        self.assertEqual(occlusion_violations(report), [])
+        cfg['windows'][0]['occlusion'] = [[.75, 0, .25, 1]]  # task panel mostly dead
+        self.assertEqual(occlusion_violations(occlusion_summary(cfg)), ['w1'])
+
+    def test_legacy_config_without_strips_reports_zero_coverage(self):
+        cfg = dict(device='pc1', windows=[dict(name='w1', device='pc1')])
+        report = occlusion_summary(cfg)
+        self.assertEqual(report[0]['covered'],
+                         {'top_bar': 0, 'task_panel': 0, 'menu_buttons': 0})
+        self.assertEqual(occlusion_violations(report), [])
 
 
 class FrameFreshness(unittest.TestCase):

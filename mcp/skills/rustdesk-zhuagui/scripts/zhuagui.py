@@ -906,13 +906,22 @@ async def run(args):
                             continue
                         try:
                             image = await capture(win)
+                            s['stale_streak'] = 0
                             image.save(args.output/f"latest-{win['name']}.png")
                             obs, items = await asyncio.to_thread(recognize, image, wf, anchors[i], s['active'], cache=caches[i])
                             if not s.get('anchored') and obs['state'] in ('task', 'battle', 'round_done'):
                                 if await recovery_window_aligned(win, call, cfg):
                                     s['anchored'] = True
-                                else:
+                                    s.pop('boundary_streak', None)
+                                elif s.get('boundary_streak', 0) >= cfg.get('boundary_retries', 150):
                                     s['paused'] = 'recovery window boundary not verified; recalibrate rectangle'
+                                else:
+                                    # A round-end popup dims the content and hides
+                                    # the bottom edge; wait out its countdown
+                                    # instead of pausing immediately.
+                                    s['boundary_streak'] = s.get('boundary_streak', 0)+1
+                                    if s['boundary_streak'] == 1:
+                                        event(window=win['name'], boundary_wait=True)
                             if (args.execute and not s['initialized'] and obs['state'] == 'task'
                                     and s.get('anchored') and not s.get('paused')):
                                 if await asyncio.to_thread(read_recovery_dialog, image):
@@ -961,6 +970,17 @@ async def run(args):
                         except Exception as exc:
                             if stopping():
                                 break
+                            if (str(exc).startswith('Stale screenshot')
+                                    and s.get('stale_streak', 0) < cfg.get('stale_retries', 3)):
+                                # A single stale frame under decode load is
+                                # transient; retry before pausing the window.
+                                # A genuinely frozen stream exhausts the
+                                # retries and still pauses.
+                                s['stale_streak'] = s.get('stale_streak', 0)+1
+                                event(window=win['name'], stale_retry=s['stale_streak'],
+                                      pending=s.get('pending'))
+                                await asyncio.sleep(1.5)
+                                continue
                             s['paused'] = str(exc)
                             event(window=win['name'], error=str(exc), pending=s.get('pending'))
                         persist()

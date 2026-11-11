@@ -7,6 +7,9 @@ navigate → 进入战斗 → auto battle → next protector, 14 per chain; when
 panel shows 领取门派闯关任务 the chain is complete and a new claim starts.
 The activity ends when, after a battle, the panel offers neither a protector
 nor a claim. Two clients on pc1 = two independent teams, driven serially.
+Neighbor clients may slightly overlap a leader window's edges (five clients
+cannot tile one screen); the overlapping strips are masked out of OCR and
+clicks never land in them (occlusion_summary / clamp_box).
 Recognition is local OCR (Apple Vision) + battle anchors; every click/scroll
 goes through the humanized planner. The model only calibrates, reports and
 reconciles pauses.
@@ -35,7 +38,7 @@ from _framework.artifacts import event_logger, save, shot_name
 from _framework.humanize import ClickPlanner, ScrollPlanner
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr
-from _framework.window_targets import locate_targets
+from _framework.window_targets import covered_fraction, locate_targets
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node, Screen, Workflow,
                                  find_row_button, find_text)
 
@@ -59,6 +62,15 @@ ATTACK_BOX = (0.78, 0.80, 0.15, 0.2)
 # START_GRACE seconds refuses the takeover. Inputs stay gated on
 # `initialized`, so nothing is sent while the first screens settle.
 START_GRACE = 20
+MAX_ACTION_TIMEOUT = 20.0
+MAX_ACTION_RETRIES = 2
+
+# --- occlusion by neighbor clients (five clients cannot tile one screen
+# unobscured). Strips come from the startup inventory; recognition never
+# reads them (painted flat before OCR) and clicks never land in them. ----
+OCCLUSION_MASK = (96, 96, 96)
+CRITICAL_BANDS = (('task_panel', TASK_BOX), ('menu_buttons', MENU_OPTS))
+BAND_COVER_LIMIT = .8
 
 
 def _center_in(it, box):
@@ -97,6 +109,63 @@ def task_n_of(items):
         if m:
             return int(m.group(1)), int(m.group(2))
     return None, None
+
+
+def mask_strips(img, strips, color=OCCLUSION_MASK):
+    """Paint covered strips flat so neighbor-window pixels never reach OCR.
+    The game text physically under a cover is unrecoverable either way; the
+    mask only removes the *wrong* text (neighbor UI) from classification."""
+    for sx, sy, sw, sh in strips:
+        x0, y0 = round(sx*img.width), round(sy*img.height)
+        x1, y1 = round((sx+sw)*img.width), round((sy+sh)*img.height)
+        if x1 > x0 and y1 > y0:
+            img.paste(color, (x0, y0, x1, y1))
+
+
+def clamp_box(box, strips):
+    """Shrink a normalized target box out of edge-attached occlusion strips
+    so a sampled click point lands on this window's own visible pixels. A
+    strip crossing the box's middle (rare in a tiled cascade) cannot be
+    clamped away; the caller re-checks the sampled point against strips."""
+    x, y, w, h = box
+    for sx, sy, sw, sh in strips:
+        if sx >= x+w or sx+sw <= x or sy >= y+h or sy+sh <= y:
+            continue
+        if sx <= x < sx+sw:
+            x, w = sx+sw, w-(sx+sw-x)
+        if sx < x+w <= sx+sw:
+            w = sx-x
+        if sy <= y < sy+sh:
+            y, h = sy+sh, h-(sy+sh-y)
+        if sy < y+h <= sy+sh:
+            h = sy-y
+    return (x, y, max(w, 0.0), max(h, 0.0))
+
+
+def point_in_strips(px, py, strips):
+    return any(sx <= px < sx+sw and sy <= py < sy+sh for sx, sy, sw, sh in strips)
+
+
+def occlusion_summary(cfg):
+    """Per-leader occlusion report for the run dir: covered strips plus the
+    covered fraction of each band the loop must read or click."""
+    report = []
+    for win in cfg['windows']:
+        strips = win.get('occlusion') or []
+        report.append(dict(
+            window=win['name'], device=win.get('device', cfg.get('device')),
+            strips=[[round(v, 4) for v in strip] for strip in strips],
+            covered={name: round(covered_fraction(box, strips), 4)
+                     for name, box in (('top_bar', TOP_BAR),)+CRITICAL_BANDS}))
+    return report
+
+
+def occlusion_violations(report):
+    """Windows whose task panel or menu buttons are mostly covered — the
+    loop cannot click what it cannot see; refuse before any input."""
+    return [entry['window'] for entry in report
+            if any(entry['covered'][name] > BAND_COVER_LIMIT
+                   for name, _ in CRITICAL_BANDS)]
 
 
 def build_screens():
@@ -148,27 +217,27 @@ class MenpaiWorkflow(Workflow):
 
 def build_workflow(cfg):
     """The workflow graph. Each node = one step; confirmation comes from
-    observing an expected screen, never from blind retry. Navigation clicks
-    (walk to the protector / back to the messenger) get long timeouts."""
+    observing an expected screen, never from blind retry. Every action has a
+    20-second confirmation limit; unconfirmed actions pause for reconciliation."""
     entry = cfg.get('activity_entry', '门派闯关')
     nodes = [
         Node('open_activity', 'normal', ClickPoint(box=tuple(cfg['activity_button'])),
-             expect=['activity_panel'], timeout=20),
+             expect=['activity_panel'], timeout=MAX_ACTION_TIMEOUT),
         Node('join_entry', 'activity_panel',
              ClickEntry(entry=entry, button='参加', search_box=LIST_AREA,
                         max_scrolls=cfg.get('max_scrolls', 4),
                         scroll_box=tuple(cfg.get('activity_list_scroll', (.45, .25, .35, .40)))),
-             expect=['messenger_menu', 'claim_menu'], timeout=120),
+             expect=['messenger_menu', 'claim_menu'], timeout=MAX_ACTION_TIMEOUT),
         Node('select_menpai', 'messenger_menu', ClickText(text='门派闯关', box=MENU_OPTS),
-             expect=['claim_menu'], timeout=30),
+             expect=['claim_menu'], timeout=MAX_ACTION_TIMEOUT),
         Node('claim_task', 'claim_menu', ClickText(text='领取任务', box=MENU_OPTS),
-             expect=['task_protector'], timeout=60),
+             expect=['task_protector'], timeout=MAX_ACTION_TIMEOUT),
         Node('goto_protector', 'task_protector', ClickText(text='挑战', box=TASK_BOX),
-             expect=['protector_menu', 'battle'], timeout=150),
+             expect=['protector_menu', 'battle'], timeout=MAX_ACTION_TIMEOUT),
         Node('enter_fight', 'protector_menu', ClickText(text='进入战斗', box=MENU_OPTS),
-             expect=['battle'], timeout=30),
+             expect=['battle'], timeout=MAX_ACTION_TIMEOUT),
         Node('reclaim_loop', 'task_claim', ClickText(text='领取', box=TASK_BOX),
-             expect=['claim_menu', 'messenger_menu'], timeout=150),
+             expect=['claim_menu', 'messenger_menu'], timeout=MAX_ACTION_TIMEOUT),
     ]
     return MenpaiWorkflow(build_screens(), nodes)
 
@@ -419,6 +488,7 @@ async def run(args):
         img = Image.open(io.BytesIO(base64.b64decode(blob))).convert('RGB')
         if img.size != (w, h):
             raise RuntimeError('Crop resized or clipped')
+        mask_strips(img, win.get('occlusion') or [])
         return img
 
     async def capture_device(dev):
@@ -495,17 +565,50 @@ async def run(args):
                 return None
         else:  # Nop / unknown: nothing to send
             return None
+        bx, by, bw, bh = box
+        left, top = max(0.0, bx), max(0.0, by)
+        right, bottom = min(1.0, bx+bw), min(1.0, by+bh)
+        if right <= left or bottom <= top:
+            s['paused'] = 'click target outside window; reconcile'
+            event(window=win['name'], action_aborted=node.id,
+                  reason='click target outside window',
+                  target=act.text if isinstance(act, ClickText) else node.id)
+            return None
+        box = (left, top, right-left, bottom-top)
+        strips = win.get('occlusion') or []
+        box = clamp_box(box, strips)
+        if box[2] < .005 or box[3] < .005:
+            s['paused'] = 'click target hidden by a neighbor window; re-tile'
+            event(window=win['name'], action_aborted=node.id,
+                  reason='target under an occlusion strip',
+                  target=act.text if isinstance(act, ClickText) else node.id)
+            return None
         x0, y0, w, h = win['rect']
         if planner is None:
             x, y = round((box[0]+box[2]/2)*w), round((box[1]+box[3]/2)*h)
         else:
             x, y = planner.point(f'{win["name"]}:{node.id}', box, (w, h))
-        s.update(pending=node.id, sent=time.monotonic())
+        if point_in_strips(x/w, y/h, strips):
+            # A floating strip crosses the target's middle; never route the
+            # click through the window stacked on top of it.
+            s['paused'] = 'click landing point hidden by a neighbor window; re-tile'
+            event(window=win['name'], action_aborted=node.id,
+                  reason='landing point under a floating occlusion strip',
+                  point=[round(x/w, 4), round(y/h, 4)])
+            return None
+        absolute = [x0+x, y0+y]
+        target = dict(text=act.text, box=[round(v, 5) for v in box]) if isinstance(act, ClickText) else None
+        s.update(pending=node.id, sent=time.monotonic(), pending_click=dict(
+            target=target, source_state=obs['state'], task_n=obs.get('task_n'),
+            task_total=obs.get('task_total'), box=[round(v, 5) for v in box],
+            local=[x, y], absolute=absolute, rect=list(win['rect'])))
         before = shot_name(win['name'], node.id+'-before')
         check_img.save(args.output/before)
-        event(window=win['name'], intent=node.id, before=before, fresh=s.get('fresh'))
-        await call('click', win_device(win), x=x0+x, y=y0+y, humanize=humanize, button=button)
-        event(window=win['name'], sent=node.id)
+        event(window=win['name'], intent=node.id, before=before, fresh=s.get('fresh'),
+              click=s['pending_click'])
+        await call('click', win_device(win), x=absolute[0], y=absolute[1],
+                   humanize=humanize, button=button)
+        event(window=win['name'], sent=node.id, click_absolute=absolute)
         return node.id
 
     loop_budget = max(10.0, 7.0*len(cfg['windows']))
@@ -513,6 +616,16 @@ async def run(args):
         async with open_session(spec, repo, {'RUSTDESK_SCREENSHOT_DIR': ''}) as session:
             call = make_call(session, stopping)
             await locate_targets(cfg, call, args.output, 'menpai')
+            occlusion = occlusion_summary(cfg)
+            save(args.output/'occlusion.json', occlusion)
+            for i, entry in enumerate(occlusion):
+                states[i]['bands_covered'] = entry['covered']
+                event(window=entry['window'], occlusion=entry)
+            stuck = occlusion_violations(occlusion)
+            if stuck:
+                raise ValueError(', '.join(stuck)+': neighbor windows cover the task '
+                                 'panel or menu buttons; shift the overlapping client '
+                                 'off those bands or re-tile before running')
             keep = lease_keeper(call, devices)
             summary['status'] = 'running'
             loop_index = 0
@@ -560,8 +673,21 @@ async def run(args):
                             and obs['state'] not in ('battle', 'unknown')):
                         upper = [it for it in items if it['score'] >= .25
                                  and it['y']+it['h']/2 <= .45]
-                        if not any(t in it['text'] for it in upper
-                                   for t in ('活动', '排行', '指引')):
+                        top_bar = any(t in it['text'] for it in upper
+                                      for t in ('活动', '排行', '指引'))
+                        claim_menu = (obs['state'] == 'claim_menu'
+                                      and all(any(t in it['text'] and it['score'] >= .5
+                                                  for it in items)
+                                              for t in ('领取任务', '便捷组队')))
+                        # When the inventory says the top band is overlapped, the
+                        # top bar is unreadable rather than absent — a self-
+                        # describing menu/task state inside the rect is then
+                        # alignment evidence in its own right.
+                        top_covered = s.get('bands_covered', {}).get('top_bar', 0) >= .3
+                        menu_state = obs['state'] in (
+                            'claim_menu', 'messenger_menu', 'protector_menu',
+                            'activity_panel', 'task_protector', 'task_claim')
+                        if not top_bar and not claim_menu and not (top_covered and menu_state):
                             s['paused'] = ('window rect misaligned: no game top-bar UI inside '
                                            'the configured rect; recalibrate from '
                                            f'misaligned-{win_device(win)}.png in the run dir')
@@ -592,19 +718,58 @@ async def run(args):
                     # ---- pending confirmation (never blind-retry an input) ----
                     confirmed = None
                     if s.get('pending'):
-                        node = wf.nodes[s['pending']]
-                        if obs['state'] in node.expect:
-                            confirmed = s['pending']
+                        pending = s['pending']
+                        node = wf.nodes[pending]
+                        click = s.get('pending_click', {})
+                        task_progress = (pending == 'goto_protector'
+                                         and obs['state'] == 'task_protector'
+                                         and obs.get('task_total') == click.get('task_total')
+                                         and isinstance(click.get('task_n'), int)
+                                         and isinstance(obs.get('task_n'), int)
+                                         and obs['task_n'] > click['task_n'])
+                        if obs['state'] in node.expect or task_progress:
+                            confirmed = pending
+                            if task_progress:
+                                event(window=win['name'], confirmed_by_task_progress=pending,
+                                      from_task=click['task_n'], to_task=obs['task_n'],
+                                      evidence=f"latest-{win['name']}.png")
                             s.pop('pending', None)
                             s.pop('sent', None)
+                            s.pop('pending_click', None)
+                            s.setdefault('action_retries', {}).pop(confirmed, None)
                             s['entry_attempts'] = 0
                             if confirmed == 'claim_task':
                                 # a fresh chain starts: previous battles no longer count
                                 s['battle_seen'] = False
                                 s['task_n'] = None
                                 s['task_total'] = None
-                        elif now-s['sent'] > node.timeout:
-                            s['paused'] = 'action not confirmed: '+s['pending']
+                        elif now-s['sent'] >= node.timeout:
+                            target = click.get('target')
+                            target_visible = (target is None or find_text(
+                                items, target['text'], tuple(target['box'])) is not None)
+                            same_task = (obs.get('task_n') == click.get('task_n')
+                                         and obs.get('task_total') == click.get('task_total'))
+                            retries = s.setdefault('action_retries', {}).get(pending, 0)
+                            can_retry = (obs['state'] == node.source and target_visible
+                                         and same_task and retries < MAX_ACTION_RETRIES)
+                            if can_retry:
+                                retries += 1
+                                s['action_retries'][pending] = retries
+                                event(window=win['name'], action_retry=pending, retry=retries,
+                                      limit=MAX_ACTION_RETRIES, observed=obs['state'],
+                                      task_n=obs.get('task_n'), task_total=obs.get('task_total'),
+                                      prior_click=click, evidence=f"latest-{win['name']}.png")
+                                s.pop('pending', None)
+                                s.pop('sent', None)
+                                s.pop('pending_click', None)
+                            else:
+                                s['paused'] = 'action not confirmed: '+pending
+                                event(window=win['name'], action_timeout=pending,
+                                      timeout_seconds=node.timeout, retries=retries,
+                                      retry_limit=MAX_ACTION_RETRIES, observed=obs['state'],
+                                      target_visible=target_visible, same_task=same_task,
+                                      task_n=obs.get('task_n'), task_total=obs.get('task_total'),
+                                      click=click, evidence=f"latest-{win['name']}.png")
 
                     # ---- unknown-screen policy: inputs withheld ----
                     if obs['state'] == 'unknown' and not s.get('paused'):

@@ -96,6 +96,13 @@ def classify(items, keyword='', slots=SLOTS, bands=None):
     return dict(state=state, ready=ready, button=kick_button if state == 'kickwarn' else button)
 
 
+def band_hit(items, text, box, confidence=.25):
+    x, y, w, h = box
+    return any(text in it['text'] and it['score'] >= confidence
+               and x <= it['x']+it['w']/2 <= x+w and y <= it['y']+it['h']/2 <= y+h
+               for it in items)
+
+
 def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=None):
     bands = bands or DEFAULT_BANDS
     started = time.monotonic()
@@ -107,6 +114,11 @@ def recognize(img, keyword='', slots=SLOTS, anchors=None, active=False, bands=No
     if any('房间' in it['text'] and it['y'] < .1 for it in items):
         items.extend(region_ocr(img, bands['room_band'], 2))
     obs = classify(items, keyword, slots, bands)
+    if obs['state'] != 'panel' and band_hit(items, '每周任务', bands['panel_title']):
+        # Small windows misread the 战斗历程 tab at zoom 1 (程→桯); re-scan the
+        # panel strip enlarged before the panel state is lost.
+        items.extend(region_ocr(img, bands['panel_body'], 2))
+        obs = classify(items, keyword, slots, bands)
     if obs['state'] in ('room', 'matching'):
         ready_scanned = True
         for ready, slot in zip(obs['ready'], slots):

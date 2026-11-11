@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
-from window_targets import (build_config, identity_matches, locate_targets,
+from window_targets import (build_config, covered_fraction, covered_strips,
+                            identity_matches, locate_targets,
                             read_inventory, resolve_accounts, discover_windows)
 
 
@@ -118,6 +119,58 @@ class SelectionTests(Fixtures, unittest.TestCase):
         with self.assertRaises(ValueError):
             read_inventory(self.paths[0])
 
+    def cascade(self):
+        # 5-client layout: the middle-top window (id 2) is overlapped on both
+        # edges by ~4.5%-wide neighbor strips — beyond the old minor-overlap
+        # tolerance, fine for an occlusion-aware runner.
+        return dict(device='pc1', native_resolution=[1920, 1080], windows=[
+            dict(id='1', rect=[0, 0, 660, 495]),
+            dict(id='2', rect=[630, 0, 660, 495]),
+            dict(id='3', rect=[1260, 0, 660, 495]),
+            dict(id='4', rect=[0, 495, 830, 585]),
+            dict(id='5', rect=[800, 495, 830, 585])])
+
+    def test_covered_fraction_merges_overlapping_strips(self):
+        self.assertEqual(covered_fraction([0, 0, 1, 1], []), 0)
+        self.assertAlmostEqual(covered_fraction([0, 0, 1, 1], [[.98, 0, .02, 1]]), .02)
+        # strips sharing a corner count once, not twice
+        self.assertAlmostEqual(covered_fraction([0, 0, 1, 1],
+                                                [[.98, 0, .02, 1], [0, .98, 1, .02]]), .0396)
+        # band coverage is relative to the band, not the window
+        self.assertAlmostEqual(covered_fraction([.7, .12, .3, .24], [[.98, 0, .02, 1]]),
+                               .02*.24/.072, places=4)
+
+    def test_covered_strips_skip_the_window_itself(self):
+        strips = covered_strips([630, 0, 660, 495], self.cascade(), '2')
+        self.assertTrue(any(s[0] == 0 for s in strips))          # left edge strip
+        self.assertTrue(any(s[0]+s[2] > .99 for s in strips))    # right edge strip
+        self.assertAlmostEqual(covered_fraction([0, 0, 1, 1], strips), 60/660, places=4)
+
+    def test_occlusion_aware_selection_maps_neighbor_strips(self):
+        self.pc1 = self.cascade()
+        self.paths[0].write_text(json.dumps(self.pc1))
+        cfg = build_config(self.template, self.paths, ['pc1:2', 'pc2:2'],
+                           ['角色2', '角色2'], 'menpai')
+        resolved = resolve_accounts(cfg, {'pc1': self.pc1, 'pc2': self.pc2},
+                                    {'pc1': frame(self.pc1), 'pc2': frame(self.pc2)}, recognize)
+        self.assertTrue(resolved[0]['occlusion'])
+        self.assertAlmostEqual(covered_fraction([0, 0, 1, 1], resolved[0]['occlusion']),
+                               60/660, places=4)
+
+    def test_strict_selection_still_rejects_neighbor_overlap(self):
+        self.pc1 = self.cascade()
+        self.paths[0].write_text(json.dumps(self.pc1))
+        with self.assertRaisesRegex(ValueError, 'overlapping'):
+            build_config(self.template, self.paths, ['pc1:2', 'pc2:2'],
+                         ['角色2', '角色2'], 'zhuagui')
+
+    def test_mostly_hidden_leader_rejected_when_occlusion_aware(self):
+        self.pc1['windows'].append(dict(id='6', rect=[60, 60, 500, 400]))
+        self.paths[0].write_text(json.dumps(self.pc1))
+        with self.assertRaisesRegex(ValueError, 'mostly hidden'):
+            build_config(self.template, self.paths, ['pc1:6', 'pc2:2'],
+                         ['角色6', '角色2'], 'menpai')
+
     def test_unselected_overlapping_window_is_not_ignored(self):
         self.pc1['windows'][0]['rect'] = self.pc1['windows'][3]['rect']
         self.paths[0].write_text(json.dumps(self.pc1))
@@ -155,7 +208,7 @@ class SelectionTests(Fixtures, unittest.TestCase):
         detector = lambda *a: (rects, [])
         with patch('window_targets.layout_detector', return_value=detector):
             with patch('window_targets.region_ocr', return_value=[]):
-                with self.assertRaisesRegex(ValueError, 'independent'):
+                with self.assertRaisesRegex(ValueError, 'No visible game windows'):
                     discover_windows(image, 'pc1')
             items = [dict(text=t, score=.9, x=.2+i*.1, y=.04, w=.06, h=.04)
                      for i, t in enumerate(('活动', '排行'))]
@@ -165,7 +218,7 @@ class SelectionTests(Fixtures, unittest.TestCase):
 
     def test_discovery_rejects_clipped_or_non_game_geometry(self):
         with patch('window_targets.layout_detector', return_value=lambda *a: ([[0, 0, 640, 300]], [])):
-            with self.assertRaisesRegex(ValueError, 'boundaries'):
+            with self.assertRaisesRegex(ValueError, 'No visible game windows'):
                 discover_windows(frame(self.pc1), 'pc1')
 
 

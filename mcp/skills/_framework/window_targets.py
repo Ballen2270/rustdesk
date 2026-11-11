@@ -28,6 +28,11 @@ else:
 
 ACTIVITIES = ('zhuagui', 'fuben', 'menpai', 'mijing', 'jianhui')
 
+# Activities whose runner consumes a per-window occlusion map (masked OCR +
+# click guards). They may select windows whose edges are overlapped by
+# neighbor clients; every other activity keeps the strict uncovered rule.
+OCCLUSION_AWARE_ACTIVITIES = {'menpai'}
+
 
 def read_inventory(path):
     data = json.loads(Path(path).read_text(encoding='utf-8-sig'))
@@ -78,6 +83,69 @@ def require_uncovered(window, inventory):
             raise ValueError('Tile overlapping windows before selecting '+inventory['device']+':'+window['id'])
 
 
+def covered_strips(rect, inventory, own_id=None):
+    """Normalized strips of `rect` overlapped by other inventory windows.
+    Z-order is unknown, so an overlap is conservatively treated as covered —
+    clicks and OCR must stay out of it either way."""
+    x, y, w, h = rect
+    strips = []
+    for other in inventory['windows']:
+        if other['id'] == own_id:
+            continue
+        ox, oy, ow, oh = other['rect']
+        left, top = max(x, ox), max(y, oy)
+        right, bottom = min(x+w, ox+ow), min(y+h, oy+oh)
+        if left < right and top < bottom:
+            strips.append([(left-x)/w, (top-y)/h, (right-left)/w, (bottom-top)/h])
+    return strips
+
+
+def covered_fraction(box, strips):
+    """Fraction of normalized `box` covered by the union of `strips`."""
+    x0, y0, w, h = box
+    if w <= 0 or h <= 0:
+        return 0.0
+    clips = []
+    for sx, sy, sw, sh in strips:
+        cx0, cy0 = max(x0, sx), max(y0, sy)
+        cx1, cy1 = min(x0+w, sx+sw), min(y0+h, sy+sh)
+        if cx0 < cx1 and cy0 < cy1:
+            clips.append((cx0, cy0, cx1, cy1))
+    if not clips:
+        return 0.0
+    edges = sorted({v for clip in clips for v in (clip[0], clip[2])})
+    covered = 0.0
+    for left, right in zip(edges, edges[1:]):
+        spans = sorted((clip[1], clip[3]) for clip in clips
+                       if clip[0] <= left and clip[2] >= right)
+        merged, lo, hi = 0.0, None, None
+        for slo, shi in spans:
+            if hi is None or slo > hi:
+                if hi is not None:
+                    merged += hi-lo
+                lo, hi = slo, shi
+            else:
+                hi = max(hi, shi)
+        if hi is not None:
+            merged += hi-lo
+        covered += (right-left)*merged
+    return min(1.0, covered/(w*h))
+
+
+def ensure_selectable(window, inventory, occlusion_aware):
+    """Occlusion-aware activities may pick windows whose edges are overlapped
+    by neighbor clients (their runner masks and guards the strips); only a
+    mostly hidden window is refused. Returns the window's covered strips."""
+    strips = covered_strips(window['rect'], inventory, window.get('id'))
+    if occlusion_aware:
+        if covered_fraction([0, 0, 1, 1], strips) > .5:
+            raise ValueError('Selected window is mostly hidden by neighbors; re-tile '
+                             'before selecting '+inventory['device']+':'+window['id'])
+    else:
+        require_uncovered(window, inventory)
+    return strips
+
+
 def build_config(template, inventory_paths, targets, identities, activity):
     if activity not in ACTIVITIES:
         raise ValueError('Unknown activity')
@@ -110,7 +178,7 @@ def build_config(template, inventory_paths, targets, identities, activity):
         candidate = next((w for w in inventory['windows'] if w['id'] == key), None)
         if candidate is None:
             raise ValueError('Unknown target: '+target)
-        require_uncovered(candidate, inventory)
+        ensure_selectable(candidate, inventory, activity in OCCLUSION_AWARE_ACTIVITIES)
         win = copy.deepcopy(defaults[index]) if index < len(defaults) else {}
         win.update(name='target-'+str(index+1), device=device,
                    rect=list(candidate['rect']), native_resolution=list(inventory['native_resolution']),
@@ -148,6 +216,7 @@ def resolve_accounts(cfg, inventories, images, recognize=region_ocr):
     """Match identities on each device, independently of previous positions."""
     resolved, used = [], set()
     cache = {}
+    aware = cfg.get('target_activity') in OCCLUSION_AWARE_ACTIVITIES
     for win in cfg['windows']:
         device = win.get('device', cfg.get('device'))
         inventory, image = inventories[device], images[device]
@@ -176,13 +245,16 @@ def resolve_accounts(cfg, inventories, images, recognize=region_ocr):
         if len(matches) != 1:
             raise ValueError(f'{device}: identity {identity!r} matched {len(matches)} windows; select a visible unique identity/identity_box')
         candidate = matches[0]
-        require_uncovered(candidate, inventory)
+        strips = ensure_selectable(candidate, inventory, aware)
         key = (device, candidate['id'])
         if key in used:
             raise ValueError('Two targets resolve to the same window: '+device)
         used.add(key)
-        resolved.append(dict(win, rect=list(candidate['rect']),
-                             native_resolution=list(inventory['native_resolution'])))
+        entry = dict(win, rect=list(candidate['rect']),
+                     native_resolution=list(inventory['native_resolution']))
+        if aware:
+            entry['occlusion'] = strips
+        resolved.append(entry)
     return resolved
 
 
@@ -250,9 +322,14 @@ def discover_windows(image, device):
             rects = measured
     for rect in sorted(rects, key=lambda r: (r[1], r[0])):
         x, y, w, h = rect
-        if (min(x, y) < 0 or min(w, h) < 300 or x+w > image.width or y+h > image.height
-                or not 1.15 <= w/h <= 1.55):
-            raise ValueError('Window boundaries are ambiguous; tile unobscured 4:3 game windows')
+        left, top = max(0, x), max(0, y)
+        right, bottom = min(image.width, x+w), min(image.height, y+h)
+        if right-left < 300 or bottom-top < 300:
+            continue
+        rect = [left, top, right-left, bottom-top]
+        x, y, w, h = rect
+        if not 1.15 <= w/h <= 1.55:
+            continue
         crop = image.crop((x, y, x+w, y+h))
         items = region_ocr(crop, [0, 0, 1, .15], 2)
         topbar = (text_hits(items, '活动', [0, 0, 1, .15], .5)
@@ -262,7 +339,7 @@ def discover_windows(image, device):
                          for t in ('活动', '排行', '指引')) >= 2
         room = any('的房间' in it['text'] and it['score'] >= .5 for it in items)
         if not topbar and not room:
-            raise ValueError('No independent game/room anchor in candidate '+str(rect))
+            continue
         candidates.append(dict(id='w'+str(len(candidates)+1), rect=rect))
     if not candidates:
         raise ValueError('No visible game windows')
