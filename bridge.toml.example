@@ -4,6 +4,8 @@
 [connection]
 # Host's RustDesk peer ID (required).
 id = "123456789"
+# Skip direct connection attempts and require RustDesk relay.
+force_relay = false
 # Self-hosted hbbs domain (omit to use the public/default server).
 server = "hbbs.example.com"
 # hbbs public key (only if your self-hosted server uses a key; omit otherwise).

@@ -44,6 +44,7 @@ id = "被控端的ID"
 server = "hbbs.example.com:21116"   # 公共服务器则删除本行与 key 行
 key = "hbbs公钥"
 password = "被控端永久密码"
+force_relay = false                  # true 时强制通过 RustDesk 中继连接
 
 [video]
 quality = "balanced"                 # best | balanced | low | custom

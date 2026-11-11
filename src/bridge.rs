@@ -92,6 +92,8 @@ impl Default for BridgeConfig {
 struct ConnectionCfg {
     id: String,
     #[serde(default)]
+    force_relay: bool,
+    #[serde(default)]
     server: Option<String>,
     #[serde(default)]
     key: Option<String>,
@@ -405,8 +407,9 @@ pub fn run() {
     let port = cfg.ipc.port;
     let peer = build_peer(&cfg.connection);
     eprintln!(
-        "[bridge] peer={peer} server={} port={port}",
-        cfg.connection.server.as_deref().unwrap_or("(default)")
+        "[bridge] peer={peer} server={} port={port} force_relay={}",
+        cfg.connection.server.as_deref().unwrap_or("(default)"),
+        cfg.connection.force_relay
     );
 
     let handler = BridgeHandler::default();
@@ -431,7 +434,15 @@ pub fn run() {
         .lc
         .write()
         .unwrap()
-        .initialize(peer.clone(), ConnType::DEFAULT_CONN, None, false, None, None, None);
+        .initialize(
+            peer.clone(),
+            ConnType::DEFAULT_CONN,
+            None,
+            cfg.connection.force_relay,
+            None,
+            None,
+            None,
+        );
 
     // Video quality/fps — applied before connect; send() is a no-op pre-connection,
     // the config is persisted and read when io_loop builds the OptionMessage.
