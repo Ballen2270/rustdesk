@@ -1,0 +1,20 @@
+{
+  "annotation_note": "Content rectangles manually estimated from the two supplied 1920x1080 screenshots, excluding title bars; tolerance 8 px accounts for borders and manual annotation. Ground truth is evaluation-only, never passed to the detector. These two samples are development cases, not an independent test set.",
+  "tolerance_px": 8,
+  "cases": [
+    {
+      "id": "image1-clear",
+      "file": "pc3.png",
+      "sha256": "74d909ff7e3a7b8ca1d5c342a75eba3ef24f49a80e9688ae3a0821f7a98d1de5",
+      "size": [1920, 1080],
+      "rects": [[0, 33, 648, 484], [652, 33, 651, 485], [1304, 325, 600, 449], [2, 550, 650, 486], [655, 552, 641, 482]]
+    },
+    {
+      "id": "image2-panel",
+      "file": "pc1.png",
+      "sha256": "d63d60027012f614d7156cc5942559667c2c2462b3339e03ba7295e0bf2ec618",
+      "size": [1920, 1080],
+      "rects": [[1, 31, 640, 480], [644, 31, 635, 480], [1272, 251, 640, 480], [1, 552, 640, 480], [644, 552, 640, 480]]
+    }
+  ]
+}

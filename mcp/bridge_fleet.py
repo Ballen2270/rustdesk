@@ -73,10 +73,22 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IPC_TIMEOUT_S = 30.0
+# Gateway mode: the gateway serializes every device command under its action
+# lock (up to ACTION_LOCK_TIMEOUT_S=45s), so a queued command can legally wait
+# longer than IPC_TIMEOUT_S before it is even serviced. The recv timeout must
+# exceed the lock timeout, otherwise a busy device surfaces as a bare
+# TimeoutError instead of the gateway's own answer.
+GATEWAY_IPC_TIMEOUT_S = 50.0
 # Worst legit serialized action ≈ 10s first-frame wait + 3s stale wait + 30s
 # IPC; beyond that the bridge is wedged and queueing behind it forever is
 # what turns one bad IPC into a dead fleet — fail fast instead.
 ACTION_LOCK_TIMEOUT_S = 45.0
+# Cold start: the host pops its connection-management panel when a session
+# comes up and auto-minimizes it ~3s later, so the first decoded frames are
+# covered by that panel. Wait (bounded) for it to clear before capturing.
+FIRST_FRAME_TIMEOUT_S = 10.0
+CM_PANEL_SETTLE_S = 3.5
+CM_PANEL_MAX_WAIT_S = 4.0
 # Shared with rustdesk_mcp.py single-device mode (screenshots of all devices
 # land in the same content-hash-named directory, prefixed by device name).
 SCREENSHOT_DIR = os.environ.get("RUSTDESK_SCREENSHOT_DIR", "~/rustdesk-screenshots")
@@ -168,6 +180,44 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return buf
 
 
+def _listener_pids(port: int) -> list[int]:
+    """PIDs of the process(es) LISTENING on `port`."""
+    try:
+        r = subprocess.run(
+            ["lsof", "-tiTCP:" + str(port), "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(p) for p in r.stdout.split()]
+
+
+def _kill_listeners(port: int) -> str:
+    """TERM then KILL whatever LISTENs on `port` (bounded waits), so a wedged
+    process's port is free before the caller respawns anything on it."""
+    listeners = _listener_pids(port)
+    for pid in listeners:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and _listener_pids(port):
+        time.sleep(0.1)
+    for pid in _listener_pids(port):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if _listener_pids(port):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and _listener_pids(port):
+            time.sleep(0.1)
+    if not listeners:
+        return f"nothing listening on port {port}"
+    return f"killed unresponsive listener pid(s) {listeners} on port {port}"
+
+
 @dataclass
 class DeviceCfg:
     name: str
@@ -177,6 +227,10 @@ class DeviceCfg:
     autostart: bool = False
     idle_timeout: float = 600.0
     max_duration: float = 0.0
+    # Optional: serve this device through a shared device_gateway.py process
+    # (single owner for the bridge, cross-process input serialization, shared
+    # decoded-frame cache). None = talk to the bridge directly (legacy path).
+    gateway_port: int | None = None
 
 
 @dataclass
@@ -196,6 +250,18 @@ class Device:
     extend_until: float = 0.0  # keep_alive deadline; suppresses sleep before it
     started_at: float = 0.0  # when WE spawned the bridge (max_duration anchor)
     orphan_seen: float = 0.0  # first sight of the current orphaned external bridge
+    # Gateway mode: `gateway_spawned` holds the gateway process we started;
+    # the bridge is the gateway's child and this session never spawns/kills
+    # it directly. `spawned` stays None in gateway mode.
+    gateway_spawned: subprocess.Popen[bytes] | None = field(default=None, repr=False)
+    fleet_path: Path | None = field(default=None, repr=False)
+    # Bumps whenever this Device's bridge process changes (spawn/teardown), so
+    # a frame cache can tell two bridge lifetimes apart after seq resets to 0.
+    generation: int = 0
+
+    @property
+    def use_gateway(self) -> bool:
+        return self.cfg.gateway_port is not None
 
     # ---- lease ---------------------------------------------------------
 
@@ -235,8 +301,11 @@ class Device:
     # ---- IPC -----------------------------------------------------------
 
     def ipc_once(self, request: dict[str, Any], touch: bool = True) -> tuple[int, bytes]:
-        """One command, one reply against this device's bridge. `touch=False`
-        for probes (liveness checks must not renew the lease)."""
+        """One command, one reply against this device's bridge (or its shared
+        gateway). `touch=False` for probes (liveness checks must not renew
+        the lease)."""
+        if self.use_gateway:
+            return self._gw_ipc_once(request, touch)
         if touch:
             self.touch()
         try:
@@ -262,8 +331,207 @@ class Device:
         except RuntimeError:
             return True  # bridge answered (even with an error reply) — alive
 
+    # ---- gateway mode --------------------------------------------------
+    # With cfg.gateway_port set, every command goes through a per-device
+    # device_gateway.py process that owns the bridge instead of this session:
+    # one global input lock across all MCP proxies, one shared decoded frame,
+    # and one lifecycle owner (a proxy exiting never kills the shared bridge).
+
+    def _gw_ipc_once(self, request: dict[str, Any], touch: bool = True,
+                     timeout: float = GATEWAY_IPC_TIMEOUT_S) -> tuple[int, bytes]:
+        if touch:
+            self.touch()
+        try:
+            sock = socket.create_connection((self.cfg.host, self.cfg.gateway_port), timeout=5.0)
+        except OSError as exc:
+            raise _ConnectFailure(str(exc)) from exc
+        with sock:
+            sock.settimeout(timeout)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.sendall((json.dumps(request) + "\n").encode())
+            header = _recv_exact(sock, 5)
+            ty = header[0]
+            (length,) = struct.unpack(">I", header[1:5])
+            return ty, _recv_exact(sock, length)
+
+    def _gw_call(self, request: dict[str, Any], timeout: float = GATEWAY_IPC_TIMEOUT_S) -> dict[str, Any]:
+        """One gateway control request. Raises _ConnectFailure when the
+        gateway is unreachable; never spawns it (callers decide)."""
+        ty, payload = self._gw_ipc_once(request, touch=False, timeout=timeout)
+        if ty != 0x01:
+            raise RuntimeError(f"[{self.cfg.name}] gateway replied with unexpected binary type {ty:#x}")
+        reply: dict[str, Any] = json.loads(payload.decode())
+        if not reply.get("ok", False):
+            raise RuntimeError(f"[{self.cfg.name}] {reply.get('err', reply)}")
+        return reply
+
+    def _gw_alive(self) -> bool:
+        try:
+            self._gw_call({"cmd": "gateway_ping"}, timeout=3.0)
+            return True
+        except (OSError, ValueError):
+            return False
+        except RuntimeError:
+            return True  # answered, even if the reply was an error
+
+    def _ensure_gateway(self) -> None:
+        """Spawn the shared gateway for this device if none is running."""
+        with self.spawn_lock:
+            if self._gw_alive():
+                return
+            if self.gateway_spawned is not None and self.gateway_spawned.poll() is None:
+                self.gateway_spawned.terminate()
+                try:
+                    self.gateway_spawned.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.gateway_spawned.kill()
+                    try:
+                        self.gateway_spawned.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            if self.fleet_path is None:
+                raise RuntimeError(
+                    f"[{self.cfg.name}] gateway mode needs the devices.toml path; "
+                    "create this device through Fleet"
+                )
+            script = REPO_ROOT / "mcp" / "device_gateway.py"
+            if not script.exists():
+                raise RuntimeError(f"gateway script missing: {script}")
+            log_path = Path(f"/tmp/rustdesk-gateway-{self.cfg.gateway_port}.log")
+            with open(log_path, "ab") as log:
+                self.gateway_spawned = subprocess.Popen(
+                    [sys.executable, str(script), "--device", self.cfg.name,
+                     "--devices-config", str(self.fleet_path)],
+                    stdout=log, stderr=log, cwd=str(REPO_ROOT),
+                )
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if self._gw_alive():
+                    if self.gateway_spawned.poll() is not None:
+                        # We lost a concurrent spawn race: another proxy's
+                        # gateway owns the port and our child exited. Adopt the
+                        # winner — it is not ours, so never hold its Popen.
+                        print(
+                            f"[rustdesk-mcp] [{self.cfg.name}] gateway already running on "
+                            f"port {self.cfg.gateway_port} (adopted, not owned)",
+                            file=sys.stderr,
+                        )
+                        self.gateway_spawned = None
+                    else:
+                        print(
+                            f"[rustdesk-mcp] [{self.cfg.name}] spawned gateway "
+                            f"pid={self.gateway_spawned.pid} port={self.cfg.gateway_port} log={log_path}",
+                            file=sys.stderr,
+                        )
+                    return
+                if self.gateway_spawned.poll() is not None:
+                    # A concurrent winner may have bound the port just before
+                    # our child failed with EADDRINUSE (it exits 0 after the
+                    # bind failure, 1 if it raced differently): adopt it
+                    # instead of crashing a proxy that can be served fine.
+                    # Retry briefly — the winner may be between bind and listen.
+                    adopt_deadline = time.monotonic() + 2.0
+                    while time.monotonic() < adopt_deadline:
+                        if self._gw_alive():
+                            print(
+                                f"[rustdesk-mcp] [{self.cfg.name}] gateway already running on "
+                                f"port {self.cfg.gateway_port} (adopted, not owned)",
+                                file=sys.stderr,
+                            )
+                            self.gateway_spawned = None
+                            return
+                        time.sleep(0.1)
+                    raise RuntimeError(
+                        f"[{self.cfg.name}] gateway exited with code "
+                        f"{self.gateway_spawned.returncode} during startup; see {log_path}"
+                    )
+                time.sleep(0.2)
+            raise RuntimeError(
+                f"[{self.cfg.name}] gateway did not become ready within 20s; see {log_path}"
+            )
+
+    def gateway_status(self) -> dict[str, Any]:
+        """Non-waking gateway+bridge snapshot ({} when the gateway is down)."""
+        try:
+            return self._gw_call({"cmd": "gateway_status"}, timeout=3.0)
+        except (OSError, ValueError, RuntimeError):
+            return {}
+
+    def _gw_stop(self) -> str:
+        try:
+            reply = self._gw_call({"cmd": "gateway_stop"}, timeout=ACTION_LOCK_TIMEOUT_S + 15.0)
+            return str(reply.get("msg") or f"[{self.cfg.name}] stopped")
+        except _ConnectFailure:
+            return (f"[{self.cfg.name}] gateway not running — nothing of ours to stop "
+                    "(a manually started bridge is left untouched)")
+        except RuntimeError as exc:
+            if "device busy" not in str(exc):
+                raise
+            note = self._gw_force_recover()
+            return f"{note}; [{self.cfg.name}] stopped (wedged action cleared)"
+
+    def _gw_restart(self) -> str:
+        try:
+            reply = self._gw_call({"cmd": "gateway_restart"}, timeout=ACTION_LOCK_TIMEOUT_S + 45.0)
+            return str(reply.get("msg") or f"[{self.cfg.name}] bridge restarted")
+        except _ConnectFailure:
+            self._ensure_gateway()
+            return (f"[{self.cfg.name}] gateway started; it reuses any running "
+                    "bridge and applies restart/stop from now on")
+        except RuntimeError as exc:
+            if "device busy" not in str(exc):
+                raise
+            note = self._gw_force_recover()
+            self._ensure_gateway()
+            return f"{note}; [{self.cfg.name}] gateway respawned"
+
+    def _gw_force_recover(self) -> str:
+        try:
+            reply = self._gw_call({"cmd": "gateway_force_recover"}, timeout=15.0)
+            return str(reply.get("msg") or "")
+        except (OSError, ValueError):
+            pass
+        except RuntimeError:
+            pass
+        # gateway unreachable or wedged: clear both listeners ourselves
+        notes = [_kill_listeners(self.cfg.port)]
+        notes.append(_kill_listeners(self.cfg.gateway_port))
+        return "; ".join(n for n in notes if n)
+
+    def _gw_external_status(self) -> dict[str, Any]:
+        st = self.gateway_status()
+        return {k: st[k] for k in ("connected", "pending_2fa", "w", "h", "seq",
+                                   "display", "target_display", "connected_for_s",
+                                   "generation", "error")
+                if k in st and st[k] is not None}
+
+    def restart(self) -> str:
+        """Restart this device's bridge (reloads its TOML) in either mode."""
+        if self.use_gateway:
+            return self._gw_restart()
+        with self.action():
+            if self.spawned is None:
+                pids = self.port_listener_pids()
+                st = self.external_status() if pids else {}
+                if st.get("connected") or st.get("pending_2fa"):
+                    return (
+                        f"[{self.cfg.name}] external bridge is running and connected — "
+                        "not owned, reused as-is (its TOML was NOT reloaded)"
+                    )
+                note = ""
+                if pids:
+                    note = self.force_recover() + "; "
+                self.ensure()
+                return f"{note}[{self.cfg.name}] bridge spawned with {self.cfg.config}"
+            self._teardown_owned()
+            self.ensure()
+            return f"[{self.cfg.name}] bridge restarted with {self.cfg.config}"
+
     def ensure(self) -> None:
         """Reuse the bridge on our port, or lazily spawn our own."""
+        if self.use_gateway:
+            self._ensure_gateway()
+            return
         with self.spawn_lock:
             if self.alive():
                 return  # already running (manual / earlier session) — reuse
@@ -308,6 +576,10 @@ class Device:
                     stderr=log,
                     cwd=str(REPO_ROOT),
                 )
+            # A new process restarts the in-process seq at 0: bump the
+            # generation so caches keyed on (generation, seq) cannot serve a
+            # frame from the previous bridge lifetime.
+            self.generation += 1
             self.started_at = time.monotonic()
             deadline = time.monotonic() + 20.0
             while time.monotonic() < deadline:
@@ -349,31 +621,120 @@ class Device:
 
     # ---- frame ---------------------------------------------------------
 
-    def fetch_frame(self, wait_for_new_frame: bool, stale_timeout_s: float) -> tuple[bytes, int, int, bool, int]:
+    @staticmethod
+    def _wait_state_error(st: dict[str, Any]) -> str | None:
+        """Why this status cannot yield a usable frame: a 2FA challenge, or a
+        session that already decoded frames and then dropped (bridge.rs never
+        reconnects its io_loop, so seq stays frozen forever)."""
+        if st.get("pending_2fa"):
+            return "host is waiting for a 2FA code - call submit_2fa"
+        if int(st.get("seq") or 0) > 0 and st.get("connected") is False:
+            return f"session dropped (error={st.get('error')})"
+        return None
+
+    @staticmethod
+    def _display_matches_target(st: dict[str, Any]) -> bool:
+        """Evidence that the latest frame came from the configured display.
+        Bridges that do not report display/target_display keep the old
+        behavior (gate open)."""
+        display = st.get("display")
+        target = st.get("target_display")
+        if display is None or target is None:
+            return True
+        return int(display) == int(target)
+
+    def _wait_failure(self, st: dict[str, Any], waited_s: float) -> RuntimeError:
+        """Error for a wait that timed out with no usable frame — reports what
+        the session was doing instead of a generic 'no fresh screenshot'."""
+        err = self._wait_state_error(st)
+        if err:
+            return RuntimeError(f"[{self.cfg.name}] {err}")
+        display, target = st.get("display"), st.get("target_display")
+        if display is not None and target is not None and int(display) != int(target):
+            return RuntimeError(
+                f"[{self.cfg.name}] video is arriving from display {display} but "
+                f"target_display={target} after {waited_s:.1f}s — if display "
+                f"{display} is intended, set [display] = {display} in the device "
+                "TOML; otherwise the bridge failed to switch displays (is the "
+                "target display present on the host?)"
+            )
+        return RuntimeError(
+            f"[{self.cfg.name}] video stopped after seq={int(st.get('seq') or 0)}: "
+            f"no usable frame decoded in {waited_s:.1f}s "
+            f"(connected={st.get('connected')}, display={display}, "
+            f"target_display={target}, error={st.get('error')}) — check the remote "
+            f"is sending video (bridge log: /tmp/rustdesk-bridge-{self.cfg.port}.log)"
+        )
+
+    def fetch_frame(self, wait_for_new_frame: bool, stale_timeout_s: float) -> tuple[bytes, int, int, bool, int, dict[str, Any]]:
         """Latest decoded frame from THIS device (same semantics as the
-        single-device _fetch_frame: poll seq, wait for first/new frame)."""
-        before = self.ipc_json({"cmd": "status"}).get("seq", 0)
+        single-device _fetch_frame: poll seq, wait for first/new frame).
+
+        The first-frame wait is evidence-gated — a decoded frame is accepted
+        only once `display` matches `target_display` (when status reports
+        them), so a device configured for another display cannot return the
+        host's default one while the bridge auto-switches. A fresh session
+        also waits (bounded) for the host's connection panel to auto-minimize
+        before the first capture.
+
+        Returns (rgba_bytes, native_w, native_h, stale, seq, status)."""
+        name = self.cfg.name
+        started = time.monotonic()
+        st = self.ipc_json({"cmd": "status"})
+        err = self._wait_state_error(st)
+        if err:
+            raise RuntimeError(f"[{name}] {err}")
+        before = int(st.get("seq") or 0)
         if before == 0:
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline:
-                if self.ipc_json({"cmd": "status"}).get("seq", 0) > 0:
+            deadline = started + FIRST_FRAME_TIMEOUT_S
+            while True:
+                st = self.ipc_json({"cmd": "status"})
+                err = self._wait_state_error(st)
+                if err:
+                    raise RuntimeError(f"[{name}] {err}")
+                if int(st.get("seq") or 0) > 0 and self._display_matches_target(st):
+                    break
+                if time.monotonic() >= deadline:
+                    raise self._wait_failure(st, time.monotonic() - started)
+                time.sleep(0.1)
+            # The host session pops its connection-management panel on connect
+            # and minimizes it ~3s later; a capture inside that window shows
+            # the panel, not the desktop. Wait for the session age to clear it,
+            # bounded by the overall budget (old bridges keep the old timing).
+            settle_deadline = min(
+                time.monotonic() + CM_PANEL_MAX_WAIT_S,
+                started + FIRST_FRAME_TIMEOUT_S + CM_PANEL_MAX_WAIT_S,
+            )
+            while time.monotonic() < settle_deadline:
+                connected_for = st.get("connected_for_s")
+                if connected_for is None or connected_for >= CM_PANEL_SETTLE_S:
                     break
                 time.sleep(0.1)
-            else:
-                raise RuntimeError(
-                    f"[{self.cfg.name}] no video frames decoded within 10s of the session "
-                    f"being up — check the remote is sending video (bridge log: "
-                    f"/tmp/rustdesk-bridge-{self.cfg.port}.log)"
-                )
+                st = self.ipc_json({"cmd": "status"})
+                err = self._wait_state_error(st)
+                if err:
+                    raise RuntimeError(f"[{name}] {err}")
+            before = int(st.get("seq") or 0)
         stale = False
         if wait_for_new_frame:
             deadline = time.monotonic() + stale_timeout_s
-            while time.monotonic() < deadline:
-                if self.ipc_json({"cmd": "status"}).get("seq", 0) > before:
+            while True:
+                st = self.ipc_json({"cmd": "status"})
+                err = self._wait_state_error(st)
+                if err:
+                    raise RuntimeError(f"[{name}] {err}")
+                if int(st.get("seq") or 0) > before:
+                    break
+                if time.monotonic() >= deadline:
+                    # A frozen seq on a session that still reports a live
+                    # connection is just an unchanged screen (stale=True keeps
+                    # its documented meaning). A gone session can never
+                    # advance: report that instead of returning a dead frame.
+                    if "connected_for_s" in st and st.get("connected_for_s") is None:
+                        raise self._wait_failure(st, stale_timeout_s)
+                    stale = True
                     break
                 time.sleep(0.03)
-            else:
-                stale = True
         ty, payload = self.ipc({"cmd": "frame"})
         if ty != 0x02:
             raise RuntimeError(f"[{self.cfg.name}] bridge replied with JSON where a frame was expected")
@@ -381,8 +742,9 @@ class Device:
         rgba = payload[8:]
         if len(rgba) != w * h * 4:
             raise RuntimeError(f"[{self.cfg.name}] frame size mismatch: {len(rgba)} bytes for {w}x{h}")
-        seq_after = self.ipc_json({"cmd": "status"}).get("seq", 0)
-        return rgba, w, h, stale, seq_after
+        st_after = self.ipc_json({"cmd": "status"})
+        seq_after = int(st_after.get("seq") or 0)
+        return rgba, w, h, stale, seq_after, st_after
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -419,6 +781,7 @@ class Device:
                 return False
             self.spawned = None
             self.extend_until = 0.0
+            self.generation += 1
             try:
                 self.ipc_once({"cmd": "quit"}, touch=False)
             except OSError:
@@ -435,17 +798,10 @@ class Device:
                         pass
             return True
 
-    def port_listener_pids(self) -> list[int]:
-        """PIDs of the process(es) LISTENING on this device's port — our
-        child, a manual one, an orphan: whoever owns it right now."""
-        try:
-            r = subprocess.run(
-                ["lsof", "-tiTCP:" + str(self.cfg.port), "-sTCP:LISTEN"],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [int(p) for p in r.stdout.split()]
+    def port_listener_pids(self, port: int | None = None) -> list[int]:
+        """PIDs of the process(es) LISTENING on this device's port (or an
+        explicit one) — our child, a manual one, an orphan: whoever owns it."""
+        return _listener_pids(self.cfg.port if port is None else port)
 
     def external_status(self) -> dict[str, Any]:
         """Status of a bridge we did not spawn. Never raises: {} when it is
@@ -453,6 +809,8 @@ class Device:
         Deliberately does NOT go through ipc() — that auto-ensures (spawns a
         bridge) on connect failure, and probes (watchdog sweep, stop/restart
         checks) must never wake a sleeping device."""
+        if self.use_gateway:
+            return self._gw_external_status()
         try:
             ty, payload = self.ipc_once({"cmd": "status"}, touch=False)
             if ty != 0x01:
@@ -468,24 +826,9 @@ class Device:
         bridge is what unblocks that action's socket). Explicit recovery
         path only (restart/stop on an unresponsive bridge); the idle
         watchdog never calls this on a parented external bridge."""
-        pids = self.port_listener_pids()
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and self.port_listener_pids():
-            time.sleep(0.1)
-        for pid in self.port_listener_pids():
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        if self.port_listener_pids():
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and self.port_listener_pids():
-                time.sleep(0.1)
+        if self.use_gateway:
+            return self._gw_force_recover()
+        note = _kill_listeners(self.cfg.port)
         if self.spawned is not None and self.spawn_lock.acquire(timeout=2.0):
             try:
                 try:
@@ -496,9 +839,7 @@ class Device:
                     self.spawned = None  # our child died out-of-band; let ensure() respawn
             finally:
                 self.spawn_lock.release()
-        if not pids:
-            return f"[{self.cfg.name}] nothing listening on port {self.cfg.port}"
-        return f"[{self.cfg.name}] killed unresponsive bridge pid(s) {pids}"
+        return f"[{self.cfg.name}] {note}"
 
     def sweep_orphan(self) -> None:
         """Idle-release for ORPHANED external bridges — a listener whose
@@ -527,6 +868,14 @@ class Device:
         the remote connection: reap it. Parented bridges (a live terminal or
         another server spawned them) and our own children are never touched
         here — those go through the ordinary reuse-only / lease policies."""
+        if self.use_gateway:
+            # The gateway owns (and sleeps/stops) the bridge. Only when the
+            # gateway is gone is a surviving bridge an orphan; fall through
+            # to the direct logic, which probes the bridge port itself.
+            if self.gateway_spawned is not None and self.gateway_spawned.poll() is None:
+                return
+            if self._gw_alive():
+                return
         if self.in_flight > 0:
             return
         pids = self.port_listener_pids()
@@ -565,6 +914,8 @@ class Device:
         untouched — not even 'quit', which would close a session other
         controllers may be using; an unresponsive external bridge (the
         wedged case this exists for) is force-killed."""
+        if self.use_gateway:
+            return self._gw_stop()
         if not self.action_lock.acquire(timeout=ACTION_LOCK_TIMEOUT_S):
             raise RuntimeError(
                 f"[{self.cfg.name}] device busy: the previous action has held the device "
@@ -597,6 +948,11 @@ class Device:
         is re-checked under action_lock, so an action that just started or a
         keep_alive that just landed always wins the race against the kill.
         Non-blocking: a device mid-action is by definition not idle."""
+        if self.use_gateway:
+            # The gateway holds the device-global lease (every proxy's calls
+            # feed it) and runs its own watchdog; sleeping from here would
+            # use this session's stale lease and fight the gateway.
+            return
         if not self.action_lock.acquire(blocking=False):
             return
         try:
@@ -658,6 +1014,13 @@ class Fleet:
 
             idle_timeout = _num("idle_timeout", 600.0)
             max_duration = _num("max_duration", 0.0)
+            gateway_port = e.get("gateway_port")
+            if gateway_port is not None:
+                if (isinstance(gateway_port, bool) or not isinstance(gateway_port, int)
+                        or not (0 < gateway_port < 65536)):
+                    raise RuntimeError(f"{ctx}: 'gateway_port' must be an integer in 1..65535")
+                if gateway_port == port:
+                    raise RuntimeError(f"{ctx}: 'gateway_port' must differ from 'port'")
             cfg_rel = e.get("config", "")
             config = (
                 (Path(str(cfg_rel)) if Path(str(cfg_rel)).is_absolute() else REPO_ROOT / str(cfg_rel))
@@ -684,10 +1047,22 @@ class Fleet:
                     autostart=autostart,
                     idle_timeout=idle_timeout,
                     max_duration=max_duration,
+                    gateway_port=gateway_port,
                 ),
                 bridge_bin=bridge_bin,
+                fleet_path=path,
             )
             self.devices[name] = dev
+        gateway_ports = {d.cfg.gateway_port for d in self.devices.values()
+                         if d.cfg.gateway_port is not None}
+        if len(gateway_ports) != sum(1 for d in self.devices.values()
+                                     if d.cfg.gateway_port is not None):
+            raise RuntimeError(f"{path}: duplicate gateway_port between devices")
+        clash = set(seen_ports) & gateway_ports
+        if clash:
+            raise RuntimeError(
+                f"{path}: port(s) {sorted(clash)} used as both a bridge port and a gateway_port"
+            )
         self.path = path
 
     def get(self, name: str) -> Device:
@@ -724,6 +1099,10 @@ class Fleet:
 
     def stop_all_owned(self) -> None:
         for dev in self.devices.values():
+            if dev.use_gateway:
+                # The shared gateway owns the bridge and outlives any one MCP
+                # session; it sleeps the bridge and exits itself when idle.
+                continue
             if dev.spawned is not None and dev.spawned.poll() is None:
                 try:
                     dev.stop()
@@ -792,23 +1171,7 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
 
         def _restart() -> str:
             try:
-                with dev.action():
-                    if dev.spawned is None:
-                        pids = dev.port_listener_pids()
-                        st = dev.external_status() if pids else {}
-                        if st.get("connected") or st.get("pending_2fa"):
-                            return (
-                                f"[{device}] external bridge is running and connected — "
-                                "not owned, reused as-is (its TOML was NOT reloaded)"
-                            )
-                        note = ""
-                        if pids:
-                            note = dev.force_recover() + "; "
-                        dev.ensure()
-                        return f"{note}[{device}] bridge spawned with {dev.cfg.config}"
-                    dev._teardown_owned()
-                    dev.ensure()
-                    return f"[{device}] bridge restarted with {dev.cfg.config}"
+                return dev.restart()
             except RuntimeError as exc:
                 if "device busy" in str(exc):
                     # the wedged action itself holds the lock: kill the
@@ -846,6 +1209,11 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
         device; it applies whenever the device is next up."""
         dev = dev_of(device)
         dev.keep_alive(minutes)
+        if dev.use_gateway:
+            try:
+                dev._gw_call({"cmd": "gateway_keep_alive", "minutes": minutes}, timeout=5.0)
+            except (OSError, ValueError, RuntimeError):
+                pass  # gateway down: nothing of ours is connected to extend
         return f"[{device}] lease extended by {minutes} min (idle + max_duration checks suspended until then)"
 
     async def list_devices() -> str:
@@ -860,6 +1228,29 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
                 "idle_timeout_s": dev.cfg.idle_timeout,
                 "max_duration_s": dev.cfg.max_duration,
             }
+            if dev.use_gateway:
+                # Probe the gateway (non-waking); a gateway that answers for a
+                # sleeping bridge reports running=False without spawning it.
+                out["gateway_port"] = dev.cfg.gateway_port
+                st = dev.gateway_status()
+                if st:
+                    out.update(
+                        running=bool(st.get("bridge_running")),
+                        owned=bool(st.get("bridge_owned")),
+                        connected=st.get("connected"),
+                        pending_2fa=st.get("pending_2fa"),
+                        frame_seq=st.get("seq"),
+                        generation=st.get("generation"),
+                        display=st.get("display"),
+                    )
+                    if st.get("w") and st.get("h"):
+                        out["resolution"] = f"{st.get('w')}x{st.get('h')}"
+                else:
+                    out.update(running=False, connected=False, gateway=False)
+                now = time.monotonic()
+                if dev.extend_until > now:
+                    out["keep_alive_for_s"] = round(dev.extend_until - now)
+                return out
             try:
                 st = dev.ipc_once({"cmd": "status"}, touch=False)
                 ty, payload = st
@@ -871,6 +1262,8 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
                         pending_2fa=r.get("pending_2fa"),
                         resolution=f"{r.get('w')}x{r.get('h')}",
                         frame_seq=r.get("seq"),
+                        generation=dev.generation,
+                        display=r.get("display"),
                     )
                 else:
                     out.update(running=True, connected=None)
@@ -925,7 +1318,7 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
 
         def capture() -> dict[str, Any]:
             with dev.action():
-                rgba, w, h, stale, seq = dev.fetch_frame(wait_for_new_frame, 3.0)
+                rgba, w, h, stale, seq, st = dev.fetch_frame(wait_for_new_frame, 3.0)
             crop = None
             if crop_x is not None and crop_y is not None and crop_w and crop_h:
                 cx, cy = max(0, crop_x), max(0, crop_y)
@@ -942,13 +1335,25 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
                 path.write_bytes(data)
                 saved = str(path)
             return {"data": data, "mime": mime, "w": w, "h": h, "ow": ow, "oh": oh,
-                    "stale": stale, "seq": seq, "saved": saved, "crop": crop}
+                    "stale": stale, "seq": seq, "saved": saved, "crop": crop,
+                    "display": st.get("display"),
+                    "target_display": st.get("target_display"),
+                    "connected_for_s": st.get("connected_for_s"),
+                    # False for bridges too old to report it, so the note does
+                    # not claim a connection age the bridge never measured.
+                    "has_connected_for_s": "connected_for_s" in st}
 
         r = await to_thread.run_sync(capture)
         note = (
             f"device={device} native_resolution={r['w']}x{r['h']} image={r['ow']}x{r['oh']} "
             f"frame_seq={r['seq']} stale={r['stale']}"
         )
+        if r["display"] is not None:
+            note += f" display={r['display']}"
+        if r["target_display"] is not None:
+            note += f" target_display={r['target_display']}"
+        if r["has_connected_for_s"]:
+            note += f" connected_for_s={r['connected_for_s']}"
         if r["crop"]:
             cx, cy, _, _ = r["crop"]
             note += f" crop_origin=({cx},{cy}) add_origin_to_image_coords_for_native"
@@ -981,7 +1386,7 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
                     "pyobjc-framework-Vision pyobjc-framework-Quartz"
                 )
             with dev.action():
-                rgba, w, h, _, seq = dev.fetch_frame(False, 3.0)
+                rgba, w, h, _, seq, _ = dev.fetch_frame(False, 3.0)
             img = PILImage.new("RGBA", (w, h))
             img.frombytes(rgba)
             ox = oy = 0
@@ -1018,7 +1423,7 @@ def _register_fleet_tools(server: Any, fleet: Fleet) -> None:  # noqa: ANN401 �
                     "pyobjc-framework-Vision pyobjc-framework-Quartz"
                 )
             with dev.action():
-                rgba, w, h, _, seq = dev.fetch_frame(False, 3.0)
+                rgba, w, h, _, seq, _ = dev.fetch_frame(False, 3.0)
                 img = PILImage.new("RGBA", (w, h))
                 img.frombytes(rgba)
                 items = _ocr_vision(img)

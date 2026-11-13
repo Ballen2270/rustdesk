@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Offline stdio MCP test: two leader windows, one knight run + one normal run
 each, driven through cropped reference frames — with the member ready popups
-living on three extra mock devices (pc1d1/pc2/pc3, popup windows at 960/850/
-615px). The runner itself must find and click 准备 on every member device
-while the leader waits; the wait screen only auto-advances 8s after the queue
-(unreadied members fall back to the requeue path, unit-tested separately)."""
+living on the leader device and two extra mock devices (pc1/pc2/pc3, popup
+windows at 960/850/615px). The runner itself must find and click 准备 on every
+member device while the leader waits; the wait screen only auto-advances 8s
+after the queue (unreadied members fall back to the requeue path, unit-tested
+separately)."""
 import json
 import argparse
 from pathlib import Path

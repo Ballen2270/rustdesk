@@ -138,6 +138,24 @@ cp bridge.toml.example mcp/devices/pc1.toml       # 每台的连接配置（[ipc
 旧方案（复制多份 `.mcp.json` 条目、每设备一个 server）仍然可用，但 fleet 模式
 一个 server 即可。
 
+**可选：每设备共享网关（`gateway_port`）**——多个进程（多个 skill runner +
+交互会话）同时操作一台电脑时，给该设备在 `devices.toml` 里加一个唯一端口：
+
+```toml
+[[device]]
+name = "pc1"
+port = 21567
+gateway_port = 22567   # 可选；bridge 端口 + 1000
+config = "mcp/devices/pc1.toml"
+```
+
+网关（`mcp/device_gateway.py`，按需自动拉起、空闲自行退出）成为该设备
+**唯一的 bridge owner**：全局串行所有 MCP 会话的输入（跨进程不再交错）、
+用设备级租约决定睡眠（安静会话不会睡掉别人在用的连接）、会话退出不杀
+共享 bridge、同一解码帧只从 bridge 取一次供所有订阅者复用。网关只监听
+回环，协议与 bridge 相同（类型帧沿用 `[type][len][payload]`），因此客户端
+代码路径不变。
+
 fleet 的自动化测试（占 21601-21603 端口，用 dummy 对端）：
 
 ```sh
@@ -224,6 +242,10 @@ conda run -n rustdesk-mcp python mcp/test_fleet.py
 | `connected=True` 但 `frame_seq=0` 不涨 | 视频流不通：被控端缺屏幕录制权限 / 画面完全静止（正常现象，动一下就有） |
 | 截图颜色不对 | 已修复过 libyuv 字节序问题；若再现，检查 `swizzle_rgba`（[src/bridge.rs](../src/bridge.rs)） |
 | 首次唤醒后 `status` 显示未连接 | 正常——会话在握手，`status` 已内置 1.5s 平滑；稍等再查 |
+| 报 "host is waiting for a 2FA code" | 对端要 2FA：先 `submit_2fa` 再重试 |
+| 报 "session dropped (error=…)" | 会话已断：网关自持桥约 60s 自动重启；直连模式重启 bridge |
+| 报 "video stopped after seq=N" | 流冻结（死会话）；网关模式等自愈或重启 bridge |
+| 报 "video is arriving from display X but target_display=Y" | 多屏主机：devices/<name>.toml 把 `[display]` 设为实际屏号 |
 | MCP server 起不来 | `conda run -n rustdesk-mcp pip install -r mcp/requirements.txt` |
 
 日志位置：bridge → `/tmp/rustdesk-bridge-21567.log`；代理 → stderr（Claude Code 的 MCP 日志）。

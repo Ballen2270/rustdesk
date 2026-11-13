@@ -8,7 +8,14 @@
 //   request  : one JSON line, e.g. {"cmd":...} plus params:
 //     frame   {}                            -> latest decoded frame (binary reply)
 //     status  {}                            -> {"connected",w,h,seq,"pending_2fa",
-//                                              display,displays:[{index,x,y,w,h}]}
+//                                              display,target_display,connected_for_s,
+//                                              error,displays:[{index,x,y,w,h}]}
+//                                              display = index of the display the latest
+//                                              decoded frame came from (0 before any
+//                                              frame); target_display = configured
+//                                              [display] or 0; connected_for_s = seconds
+//                                              since peer info arrived, null while the
+//                                              session is not up; error = last error text
 //     display {index}                       -> switch which display is streamed (0-based)
 //     send_2fa {code,trust?}                -> answer the host's 2FA challenge (msgbox "input-2fa")
 //     tap     {x,y,w,h}                     -> humanized left click inside rect
@@ -32,7 +39,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_derive::Deserialize;
 
@@ -245,6 +252,14 @@ struct BridgeHandler {
     // Monotonic decoded-frame counter; lets a caller request "a frame newer
     // than the one I last saw" and detect a stale (pre-action) capture.
     seq: Arc<AtomicU64>,
+    // Display index the latest decoded frame came from (the video callback's
+    // display argument), reported by `status` as evidence of which display is
+    // actually being streamed.
+    frame_display: Arc<Mutex<Option<i32>>>,
+    // When the peer info arrived (a session is up). Cleared on error and, in
+    // `status`, whenever the connection round is no longer connected, so
+    // `connected_for_s` cannot outlive the session.
+    connected_at: Arc<Mutex<Option<Instant>>>,
     peer_info: Arc<RwLock<Option<PeerInfo>>>,
     error: Arc<Mutex<Option<String>>>,
     // Set while the host is waiting for a 2FA code (msgbox "input-2fa");
@@ -258,12 +273,14 @@ struct BridgeHandler {
 }
 
 impl InvokeUiSession for BridgeHandler {
-    fn on_rgba(&self, _display: usize, rgba: &mut ImageRgb) {
+    fn on_rgba(&self, display: usize, rgba: &mut ImageRgb) {
         self.seq.fetch_add(1, Ordering::Relaxed);
+        *self.frame_display.lock().unwrap() = Some(i32::try_from(display).unwrap_or(0));
         *self.latest.lock().unwrap() = Some((rgba.raw.clone(), rgba.w, rgba.h, rgba.fmt));
     }
     fn set_peer_info(&self, pi: &PeerInfo) {
         *self.pending_2fa.lock().unwrap() = false;
+        *self.connected_at.lock().unwrap() = Some(Instant::now());
         *self.peer_info.write().unwrap() = Some(pi.clone());
     }
     fn msgbox(&self, t: &str, title: &str, text: &str, _link: &str, _retry: bool) {
@@ -271,6 +288,7 @@ impl InvokeUiSession for BridgeHandler {
         if t == "input-2fa" {
             *self.pending_2fa.lock().unwrap() = true;
         } else if t == "error" {
+            *self.connected_at.lock().unwrap() = None;
             *self.error.lock().unwrap() = Some(format!("{title}: {text}"));
         }
     }
@@ -360,6 +378,10 @@ impl InvokeUiSession for BridgeHandler {
 struct BridgeState {
     latest: Arc<Mutex<Option<(Vec<u8>, usize, usize, ImageFormat)>>>,
     seq: Arc<AtomicU64>,
+    frame_display: Arc<Mutex<Option<i32>>>,
+    connected_at: Arc<Mutex<Option<Instant>>>,
+    // Configured [display], 0 when the device config sets none (host default).
+    target_display: i32,
     peer_info: Arc<RwLock<Option<PeerInfo>>>,
     error: Arc<Mutex<Option<String>>>,
     pending_2fa: Arc<Mutex<bool>>,
@@ -415,6 +437,8 @@ pub fn run() {
     let handler = BridgeHandler::default();
     let latest = handler.latest.clone();
     let seq = handler.seq.clone();
+    let frame_display = handler.frame_display.clone();
+    let connected_at = handler.connected_at.clone();
     let peer_info = handler.peer_info.clone();
     let error = handler.error.clone();
     let pending_2fa = handler.pending_2fa.clone();
@@ -457,6 +481,9 @@ pub fn run() {
     let state = Arc::new(BridgeState {
         latest,
         seq,
+        frame_display,
+        connected_at,
+        target_display: cfg.display.unwrap_or(0),
         peer_info,
         error,
         pending_2fa,
@@ -659,6 +686,24 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
                 let connected = pi.is_some() && err.is_none();
                 let seq = state.seq.load(Ordering::Relaxed);
                 let pending_2fa = *state.pending_2fa.lock().unwrap();
+                let frame_display = state.frame_display.lock().unwrap().unwrap_or(0);
+                // The bridge never starts a new connection round, so a finished
+                // io_loop (dropped session) leaves this round disconnected; do
+                // not keep reporting a connected_for_s for a session that is gone.
+                let mut connected_at = state.connected_at.lock().unwrap();
+                if !state
+                    .session
+                    .connection_round_state
+                    .lock()
+                    .unwrap()
+                    .is_connected()
+                {
+                    *connected_at = None;
+                }
+                let connected_for = (*connected_at)
+                    .map(|t| format!("{:.3}", t.elapsed().as_secs_f64()))
+                    .unwrap_or_else(|| "null".to_string());
+                let err_json = serde_json::to_string(&err).unwrap_or_else(|_| "null".to_string());
                 let list = displays
                     .iter()
                     .enumerate()
@@ -671,7 +716,8 @@ fn handle_conn(stream: TcpStream, state: Arc<BridgeState>) -> std::io::Result<()
                     .collect::<Vec<_>>()
                     .join(",");
                 let msg = format!(
-                    "{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h},\"seq\":{seq},\"pending_2fa\":{pending_2fa},\"display\":{cur},\"displays\":[{list}]}}"
+                    "{{\"ok\":true,\"connected\":{connected},\"w\":{w},\"h\":{h},\"seq\":{seq},\"pending_2fa\":{pending_2fa},\"display\":{frame_display},\"target_display\":{},\"connected_for_s\":{connected_for},\"error\":{err_json},\"displays\":[{list}]}}",
+                    state.target_display
                 );
                 write_msg(&mut writer, 0x01, msg.as_bytes())?;
             }

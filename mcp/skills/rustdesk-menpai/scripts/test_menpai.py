@@ -23,8 +23,8 @@ def item(text, x, y, score=.9):
 
 
 CFG = dict(device='pc1', calibrated=True, native_resolution=[1920, 1080],
-           windows=[dict(name='left', rect=[0, 0, 1000, 800], device='pc1d1'),
-                    dict(name='right', rect=[0, 0, 1000, 800], device='pc1d2')],
+           windows=[dict(name='left', rect=[0, 0, 1000, 800], device='pc1'),
+                    dict(name='right', rect=[0, 0, 1000, 800], device='pc2')],
            activity_button=[.28, 0, .1, .11], activity_list_scroll=[.45, .25, .35, .4])
 
 
@@ -241,8 +241,8 @@ class Validate(unittest.TestCase):
             validate({**CFG, 'calibrated': False}, 20)
 
     def test_rejects_overlapping_windows(self):
-        bad = {**CFG, 'windows': [dict(name='a', rect=[0, 0, 1000, 800], device='pc1d1'),
-                                  dict(name='b', rect=[500, 0, 1000, 800], device='pc1d1')]}
+        bad = {**CFG, 'windows': [dict(name='a', rect=[0, 0, 1000, 800], device='pc1'),
+                                  dict(name='b', rect=[500, 0, 1000, 800], device='pc1')]}
         with self.assertRaises(ValueError):
             validate(bad, 20)
 

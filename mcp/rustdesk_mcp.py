@@ -70,6 +70,12 @@ except ImportError:  # pyobjc-framework-Vision not installed
 BRIDGE_HOST = os.environ.get("RUSTDESK_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT = int(os.environ.get("RUSTDESK_BRIDGE_PORT", "21567"))
 IPC_TIMEOUT_S = 30.0
+# Cold start: the host pops its connection-management panel when a session
+# comes up and auto-minimizes it ~3s later, so the first decoded frames are
+# covered by that panel. Wait (bounded) for it to clear before capturing.
+FIRST_FRAME_TIMEOUT_S = 10.0
+CM_PANEL_SETTLE_S = 3.5
+CM_PANEL_MAX_WAIT_S = 4.0
 # Every screenshot is saved here as <md5-of-bytes>.<jpg|png> (content-hash
 # naming: identical frames dedup to one file). Empty string disables saving.
 SCREENSHOT_DIR = os.environ.get("RUSTDESK_SCREENSHOT_DIR", "~/rustdesk-screenshots")
@@ -310,40 +316,125 @@ def _ipc_json_call(request: dict[str, Any]) -> dict[str, Any]:
 # ---- frame helpers ----------------------------------------------------------
 
 
-def _fetch_frame(wait_for_new_frame: bool, stale_timeout_s: float) -> tuple[bytes, int, int, bool, int]:
+def _wait_state_error(st: dict[str, Any]) -> str | None:
+    """Why this status cannot yield a usable frame: a 2FA challenge, or a
+    session that already decoded frames and then dropped (bridge.rs never
+    reconnects its io_loop, so seq stays frozen forever)."""
+    if st.get("pending_2fa"):
+        return "host is waiting for a 2FA code - call submit_2fa"
+    if int(st.get("seq") or 0) > 0 and st.get("connected") is False:
+        return f"session dropped (error={st.get('error')})"
+    return None
+
+
+def _display_matches_target(st: dict[str, Any]) -> bool:
+    """Evidence that the latest frame came from the configured display.
+    Bridges that do not report display/target_display keep the old behavior."""
+    display = st.get("display")
+    target = st.get("target_display")
+    if display is None or target is None:
+        return True
+    return int(display) == int(target)
+
+
+def _wait_failure(st: dict[str, Any], waited_s: float) -> RuntimeError:
+    """Error for a wait that timed out with no usable frame — reports what the
+    session was doing instead of a generic 'no fresh screenshot'."""
+    err = _wait_state_error(st)
+    if err:
+        return RuntimeError(err)
+    display, target = st.get("display"), st.get("target_display")
+    if display is not None and target is not None and int(display) != int(target):
+        return RuntimeError(
+            f"video is arriving from display {display} but target_display={target} "
+            f"after {waited_s:.1f}s — if display {display} is intended, set "
+            f"[display] = {display} in the bridge TOML; otherwise the bridge "
+            "failed to switch displays (is the target display present on the host?)"
+        )
+    return RuntimeError(
+        f"video stopped after seq={int(st.get('seq') or 0)}: no usable frame "
+        f"decoded in {waited_s:.1f}s (connected={st.get('connected')}, "
+        f"display={display}, target_display={target}, error={st.get('error')}) — "
+        "check the remote is sending video (bridge log: "
+        f"/tmp/rustdesk-bridge-{BRIDGE_PORT}.log)"
+    )
+
+
+def _fetch_frame(wait_for_new_frame: bool, stale_timeout_s: float) -> tuple[bytes, int, int, bool, int, dict[str, Any]]:
     """Fetch the latest decoded frame.
 
     Polls `status` until the bridge frame counter advances past the value seen
     at entry (so the capture is guaranteed post-action), then fetches the
     latest frame. If the counter never advances within the timeout the current
-    frame is returned with stale=True.
+    frame is returned with stale=True — unless the session is gone, which is
+    reported instead (a frozen seq on a dropped session never recovers).
 
-    Returns (rgba_bytes, native_w, native_h, stale, seq).
+    The first-frame wait is evidence-gated: a decoded frame is accepted only
+    once `display` matches `target_display` (when status reports them), so a
+    bridge configured for another display cannot return the host's default one
+    while it auto-switches. A fresh session also waits (bounded) for the
+    host's connection panel to auto-minimize before the first capture.
+
+    Returns (rgba_bytes, native_w, native_h, stale, seq, status).
     """
-    before = _ipc_json({"cmd": "status"}).get("seq", 0)
+    started = time.monotonic()
+    st = _ipc_json({"cmd": "status"})
+    err = _wait_state_error(st)
+    if err:
+        raise RuntimeError(err)
+    before = int(st.get("seq") or 0)
     # Right after (re)connect no frame has been decoded yet (seq=0); wait for
     # the first one instead of erroring with "no frame yet".
     if before == 0:
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if _ipc_json({"cmd": "status"}).get("seq", 0) > 0:
+        deadline = started + FIRST_FRAME_TIMEOUT_S
+        while True:
+            st = _ipc_json({"cmd": "status"})
+            err = _wait_state_error(st)
+            if err:
+                raise RuntimeError(err)
+            if int(st.get("seq") or 0) > 0 and _display_matches_target(st):
+                break
+            if time.monotonic() >= deadline:
+                raise _wait_failure(st, time.monotonic() - started)
+            time.sleep(0.1)
+        # The host session pops its connection-management panel on connect and
+        # minimizes it ~3s later; a capture inside that window shows the
+        # panel, not the desktop. Wait for the session age to clear it, bounded
+        # by the overall budget (old bridges keep the old timing).
+        settle_deadline = min(
+            time.monotonic() + CM_PANEL_MAX_WAIT_S,
+            started + FIRST_FRAME_TIMEOUT_S + CM_PANEL_MAX_WAIT_S,
+        )
+        while time.monotonic() < settle_deadline:
+            connected_for = st.get("connected_for_s")
+            if connected_for is None or connected_for >= CM_PANEL_SETTLE_S:
                 break
             time.sleep(0.1)
-        else:
-            raise RuntimeError(
-                "no video frames decoded within 10s of the session being up — "
-                "check the remote is sending video (bridge log: "
-                f"/tmp/rustdesk-bridge-{BRIDGE_PORT}.log)"
-            )
+            st = _ipc_json({"cmd": "status"})
+            err = _wait_state_error(st)
+            if err:
+                raise RuntimeError(err)
+        before = int(st.get("seq") or 0)
     stale = False
     if wait_for_new_frame:
         deadline = time.monotonic() + stale_timeout_s
-        while time.monotonic() < deadline:
-            if _ipc_json({"cmd": "status"}).get("seq", 0) > before:
+        while True:
+            st = _ipc_json({"cmd": "status"})
+            err = _wait_state_error(st)
+            if err:
+                raise RuntimeError(err)
+            if int(st.get("seq") or 0) > before:
+                break
+            if time.monotonic() >= deadline:
+                # A frozen seq on a session that still reports a live
+                # connection is just an unchanged screen (stale=True keeps its
+                # documented meaning). A gone session can never advance:
+                # report that instead of returning a dead frame.
+                if "connected_for_s" in st and st.get("connected_for_s") is None:
+                    raise _wait_failure(st, stale_timeout_s)
+                stale = True
                 break
             time.sleep(0.03)
-        else:
-            stale = True
     ty, payload = _ipc({"cmd": "frame"})
     if ty != 0x02:
         raise RuntimeError(f"bridge replied with JSON where a frame was expected: {payload[:200]!r}")
@@ -351,8 +442,9 @@ def _fetch_frame(wait_for_new_frame: bool, stale_timeout_s: float) -> tuple[byte
     rgba = payload[8:]
     if len(rgba) != w * h * 4:
         raise RuntimeError(f"frame size mismatch: {len(rgba)} bytes for {w}x{h}")
-    seq_after = _ipc_json({"cmd": "status"}).get("seq", 0)
-    return rgba, w, h, stale, seq_after
+    st_after = _ipc_json({"cmd": "status"})
+    seq_after = int(st_after.get("seq") or 0)
+    return rgba, w, h, stale, seq_after, st_after
 
 
 def _encode(
@@ -540,7 +632,7 @@ async def screenshot(
     max_width = max(256, min(int(max_width), 2560))
 
     def capture() -> dict[str, Any]:
-        rgba, w, h, stale, seq = _fetch_frame(wait_for_new_frame, 3.0)
+        rgba, w, h, stale, seq, st = _fetch_frame(wait_for_new_frame, 3.0)
         crop = None
         if crop_x is not None and crop_y is not None and crop_w and crop_h:
             cx, cy = max(0, crop_x), max(0, crop_y)
@@ -557,13 +649,24 @@ async def screenshot(
             path.write_bytes(data)
             saved = str(path)
         return {"data": data, "mime": mime, "w": w, "h": h, "ow": ow, "oh": oh,
-                "stale": stale, "seq": seq, "saved": saved, "crop": crop}
+                "stale": stale, "seq": seq, "saved": saved, "crop": crop,
+                "display": st.get("display"),
+                "target_display": st.get("target_display"),
+                "connected_for_s": st.get("connected_for_s"),
+                # False for bridges too old to report it (status key absent).
+                "has_connected_for_s": "connected_for_s" in st}
 
     r = await to_thread.run_sync(capture)
     note = (
         f"native_resolution={r['w']}x{r['h']} image={r['ow']}x{r['oh']} "
         f"frame_seq={r['seq']} stale={r['stale']}"
     )
+    if r["display"] is not None:
+        note += f" display={r['display']}"
+    if r["target_display"] is not None:
+        note += f" target_display={r['target_display']}"
+    if r["has_connected_for_s"]:
+        note += f" connected_for_s={r['connected_for_s']}"
     if r["crop"]:
         cx, cy, _, _ = r["crop"]
         note += f" crop_origin=({cx},{cy}) add_origin_to_image_coords_for_native"
@@ -598,7 +701,7 @@ async def ocr(
                 "OCR unavailable — install it first: pip install "
                 "pyobjc-framework-Vision pyobjc-framework-Quartz"
             )
-        rgba, w, h, stale, seq = _fetch_frame(False, 3.0)
+        rgba, w, h, stale, seq, _ = _fetch_frame(False, 3.0)
         img = PILImage.new("RGBA", (w, h))
         img.frombytes(rgba)
         ox = oy = 0
@@ -632,7 +735,7 @@ async def tap_text(text: str, index: int = 0) -> str:
                 "OCR unavailable — install it first: pip install "
                 "pyobjc-framework-Vision pyobjc-framework-Quartz"
             )
-        rgba, w, h, stale, seq = _fetch_frame(False, 3.0)
+        rgba, w, h, stale, seq, _ = _fetch_frame(False, 3.0)
         img = PILImage.new("RGBA", (w, h))
         img.frombytes(rgba)
         items = _ocr_vision(img)

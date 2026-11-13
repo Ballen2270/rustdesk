@@ -553,7 +553,7 @@ class MemberConfig(unittest.TestCase):
         self.assertEqual(cfg['member_resweep'], [1.5, 3.0])
 
     def test_member_devices_accepted(self):
-        cfg = dict(self.base, members=['pc1d1', 'pc2', 'pc3'])
+        cfg = dict(self.base, members=['pc4', 'pc2', 'pc3'])
         validate(cfg)
         self.assertEqual(cfg['member_resweep'], [1.5, 3.0])
 

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import fcntl
+import hashlib
 import io
 import json
 import math
@@ -28,7 +29,7 @@ from _framework.ocr_cache import RegionOCRCache
 from _framework.session import load_spec, lease_keeper, make_call, open_session
 from _framework.vision import BattleAnchors, ocr, region_ocr, text_hits
 from _framework.window_targets import locate_targets
-from _framework.window_geometry import measure_title_windows
+from _framework.window_geometry import measure_band_windows, measure_title_windows
 from _framework.workflow import (ClickEntry, ClickPoint, ClickText, Node,
                                  Screen, Workflow, find_text)
 
@@ -99,7 +100,17 @@ def battle_hits(items):
         return True
     digit = any(it['text'].isdigit() and text_hits([it], it['text'], ROUND, .25)
                 for it in items)
-    return digit and text_hits(items, '取消', CANCEL, .5)
+    if digit and text_hits(items, '取消', CANCEL, .5):
+        return True
+    # Some windows render the command bar as icons only (art-font 攻击, no
+    # 法术/道具/防御/自动) while the round digit is thin art too. The red 取消
+    # gear stays OCR-readable at 2x; battle hides the normal top bar and task
+    # panel, so their absence separates it from scene navigation (which also
+    # shows 取消). Read the gear at 2x in recognize() for this to fire.
+    return (text_hits(items, '取消', CANCEL, .4)
+            and not any(text_hits(items, t, TOP) for t in ('活动', '排行', '指引'))
+            and not text_hits(items, '捉鬼', TASK)
+            and not text_hits(items, '日常活动', TABS))
 
 
 def build_screens():
@@ -271,6 +282,33 @@ def titlebar_runs(img, y_hint=None):
     return spans
 
 
+def measure_joined_titlebar(img, rect):
+    x0, y0, w, h = rect
+    W, H = img.size
+    top = max(0, y0-40)
+    bottom = min(H, y0+8)
+    band = (0, top/H, 1, (bottom-top)/H)
+    for scale in (1, 2):
+        items = region_ocr(img, band, scale)
+        matches = []
+        for item in items:
+            if '梦幻西游' not in item['text'] or item['score'] < .3:
+                continue
+            for candidate in measure_title_windows(img, [item]) or []:
+                x, y, width, _ = candidate
+                if (abs(x-x0) > max(40, w*.2) or abs(y-y0) > 40
+                        or abs(width-w) > max(30, w*.12)):
+                    continue
+                if not any(abs(x-old[0]) <= 4 and abs(y-old[1]) <= 4
+                           and abs(width-old[2]) <= 10 for old in matches):
+                    matches.append(candidate)
+        if len(matches) > 1:
+            return None
+        if matches:
+            return [matches[0][0], matches[0][1], w, h]
+    return None
+
+
 def recognize(img, wf, anchors=None, active=False, cache=None):
     started = time.monotonic()
     read = cache.read if cache is not None else region_ocr
@@ -286,6 +324,7 @@ def recognize(img, wf, anchors=None, active=False, cache=None):
         items += read(img, MODAL, 2)
         items += read(img, TASK, 2)
         items += read(img, ROUND, 3)
+        items += read(img, CANCEL, 2)
         state = wf.classify(items)
     if state == 'activity_panel' or text_hits(items, '活动', (.28, .07, .4, .11)):
         items += read(img, TABS, 2)
@@ -601,6 +640,8 @@ def targets(cfg, override=0):
 def validate(cfg, override=0):
     if type(cfg.get('ocr_cache', True)) is not bool:
         raise ValueError('ocr_cache must be boolean')
+    if type(cfg.get('shared_device', False)) is not bool:
+        raise ValueError('shared_device must be boolean')
     if not cfg.get('calibrated'):
         raise ValueError('Requires freshly calibrated configuration')
     base_resolution = cfg.get('native_resolution')
@@ -652,10 +693,30 @@ async def run(args):
     locks = []
     # Acquire both shared and legacy activity locks; older runners use separate names.
     lock_devs = set(devices)
+    shared_device = bool(cfg.get('shared_device'))
     try:
         for dev in sorted(lock_devs):
+            mode = fcntl.LOCK_SH if shared_device else fcntl.LOCK_EX
             for tag in ('device', 'jianhui', 'menpai', 'mijing', 'zhuagui'):
                 lock = open(f'/private/tmp/rustdesk-{tag}-{dev}.lock', 'a')
+                locks.append(lock)
+                fcntl.flock(lock, mode | fcntl.LOCK_NB)
+        if shared_device:
+            # Concurrent per-window runners on one machine: the shared device
+            # locks keep other activities out, the exclusive per-window lock
+            # keeps two runners off the same client, and the device gateway
+            # serializes every input across processes. The lock key is the
+            # stable target identity (inventory id, else identity text):
+            # build_config names every single-target window 'target-1', so
+            # two one-window configs on one device must not collide on it.
+            for win in cfg['windows']:
+                dev = win.get('device', cfg.get('device'))
+                key = win.get('inventory_id')
+                if not key:
+                    identity = (win.get('identity_text') or '').strip()
+                    key = (hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]
+                           if identity else win.get('name', 'window'))
+                lock = open(f'/private/tmp/rustdesk-window-{dev}-{key}.lock', 'a')
                 locks.append(lock)
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except Exception:
@@ -709,7 +770,7 @@ async def run(args):
         """Re-locate every window on its device before the first input.
         Windows drift between sessions (launcher, manual moves); configured
         rectangles are only a size hint, never trusted as position."""
-        frames = {}
+        frames, bands = {}, {}
         for dev in devices:
             content = await call('screenshot', dev, format='png', max_width=2560,
                                  wait_for_new_frame=True)
@@ -727,27 +788,61 @@ async def run(args):
                                        if dev_of(w) == dev)
             items = await asyncio.to_thread(topbar_strip_items, img, y_hint)
             frames[dev] = (img, items)
+            bands[dev] = await asyncio.to_thread(measure_band_windows, img) or []
+        # Title-bar pixel bands are OCR-free (immune to marquee noise, clipped
+        # titles and a notification icon splitting the bar) and locate every
+        # tiled client at once. Match each configured window to the nearest
+        # unused band of similar size; position stays a hint, identity remains
+        # the operator's recorded note.
+        pairs = []
+        for win in cfg['windows']:
+            x0, y0, w, h = win['rect']
+            for band in bands.get(dev_of(win), []):
+                bx, by, bw, bh = band
+                if (abs(bw-w) > max(30, w*.12)
+                        or abs(bh-h) > max(30, h*.15)):
+                    continue
+                pairs.append((math.hypot(bx+bw/2-(x0+w/2), by+bh/2-(y0+h/2)),
+                              win, band))
+        pairs.sort(key=lambda p: p[0])
+        matched, used = {}, set()
+        for dist, win, band in pairs:
+            if id(win) in matched or id(band) in used:
+                continue
+            if dist > max(win['rect'][2], win['rect'][3]):
+                continue
+            matched[id(win)] = list(band)
+            used.add(id(band))
         for win in cfg['windows']:
             dev = dev_of(win)
             img, items = frames[dev]
             others = [w['rect'] for w in cfg['windows'] if w is not win and dev_of(w) == dev]
             x0, y0, w, h = win['rect']
-            snapped = snap_from_anchors(items, img.size, win['rect'], others)
-            source = 'topbar_anchors'
-            # Pixel segmentation is content-based and immune to marquee text;
-            # on any disagreement it wins. The strip follows this window's
-            # configured row so tiled upper windows never win the vote.
-            spans = titlebar_runs(img, y0)
-            if spans:
-                span = min(spans, key=lambda s: abs((s[0]+s[1])/2-(x0+w/2)))
-                if snapped is None or abs(snapped[0]-span[0]) > 40 or abs(snapped[1]-span[2]) > 12:
-                    if snapped is not None:
-                        event(window=win['name'], autocal_conflict=dict(
-                            anchors=snapped, pixels=[span[0], span[2], span[1]]))
-                    snapped = [span[0], span[2], w, h]
-                    source = 'titlebar_scan'
-            elif snapped is None:
-                raise RuntimeError('autocalibrate: no game window visible on '+dev)
+            snapped = matched.get(id(win))
+            source = 'title_bands'
+            if snapped is None:
+                snapped = snap_from_anchors(items, img.size, win['rect'], others)
+                source = 'topbar_anchors'
+                # Pixel segmentation is content-based and immune to marquee
+                # text; on any disagreement it wins. The strip follows this
+                # window's configured row so tiled upper windows never win the
+                # vote.
+                spans = titlebar_runs(img, y0)
+                if spans:
+                    span = min(spans, key=lambda s: abs((s[0]+s[1])/2-(x0+w/2)))
+                    if span[1]-span[0] > w*1.2:
+                        snapped = await asyncio.to_thread(measure_joined_titlebar, img, win['rect'])
+                        if snapped is None:
+                            raise RuntimeError('autocalibrate: joined title bars cannot identify '+win['name'])
+                        source = 'titlebar_measure'
+                    elif snapped is None or abs(snapped[0]-span[0]) > 40 or abs(snapped[1]-span[2]) > 12:
+                        if snapped is not None:
+                            event(window=win['name'], autocal_conflict=dict(
+                                anchors=snapped, pixels=[span[0], span[2], span[1]]))
+                        snapped = [span[0], span[2], w, h]
+                        source = 'titlebar_scan'
+                elif snapped is None:
+                    raise RuntimeError('autocalibrate: no game window visible on '+dev)
             W, H = cfg['native_resolution']
             if snapped[0]+snapped[2] > W:
                 snapped[2] = W-snapped[0]   # stale wide width: trim, don't shift

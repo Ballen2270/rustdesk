@@ -16,6 +16,10 @@
 name = "pc1"                     # the `device` argument tools take; unique
 host = "127.0.0.1"               # default loopback
 port = 21567                     # unique per device; must equal pc1.toml [ipc] port
+# gateway_port = 22567           # optional: shared device gateway (mcp/device_gateway.py).
+                                 # One per-device process owns the bridge, serializes ALL
+                                 # input across MCP sessions, and shares decoded frames.
+                                 # Pick a unique free port (e.g. bridge port + 1000).
 config = "mcp/devices/pc1.toml"  # single-device toml with the peer's credentials
 autostart = false                # false = connect on first tool call (on-demand)
 idle_timeout = 600               # lease seconds, renewed by EVERY tool call; 0 = never sleep

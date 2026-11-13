@@ -212,15 +212,15 @@ class StateTests(unittest.TestCase):
                     windows=[dict(name='left', rect=[0, 0, 800, 600], room_keyword='甲'),
                              dict(name='right', rect=[900, 0, 800, 600], room_keyword='乙')])
         validate(dict(base, games=1), 1)  # baseline passes
-        ok = dict(base, windows=[dict(base['windows'][0], device='pc1d1'),
-                                 dict(base['windows'][1], rect=[400, 0, 800, 600], device='pc1d2',
+        ok = dict(base, windows=[dict(base['windows'][0], device='pc1'),
+                                 dict(base['windows'][1], rect=[400, 0, 800, 600], device='pc2',
                                       native_resolution=[1280, 720])])
         validate(dict(ok, games=1), 1)
-        # Each display has local coordinates, so identical rectangles on distinct
+        # Each device has local coordinates, so identical rectangles on distinct
         # devices are valid; the per-window resolution must still bound its rect.
-        local = dict(base, windows=[dict(base['windows'][0], device='pc1d1'),
+        local = dict(base, windows=[dict(base['windows'][0], device='pc1'),
                                     dict(base['windows'][0], name='right', room_keyword='乙',
-                                         device='pc1d2', native_resolution=[1280, 720])])
+                                         device='pc2', native_resolution=[1280, 720])])
         validate(dict(local, games=1), 1)
         with self.assertRaises(ValueError):
             validate(dict(local, games=1, windows=[dict(local['windows'][0]),
@@ -229,7 +229,7 @@ class StateTests(unittest.TestCase):
                                           dict(base['windows'][1], rect=[400, 0, 800, 600], device='pc1')])
         with self.assertRaises(ValueError):
             validate(dict(same_device, games=1), 1)
-        for bad in ('PC1D1', 'has space', 'x/y'):
+        for bad in ('PC1', 'has space', 'x/y'):
             w = [dict(base['windows'][0], device=bad), base['windows'][1]]
             with self.assertRaises(ValueError):
                 validate(dict(base, windows=w, games=1), 1)
@@ -238,8 +238,8 @@ class StateTests(unittest.TestCase):
             validate(dict(base, windows=w, games=1), 1)
 
     def test_keep_alive_uses_only_window_devices(self):
-        cfg = dict(device='pc1', windows=[dict(device='pc1d1'), dict(device='pc1d2')])
-        self.assertEqual(configured_devices(cfg), ['pc1d1', 'pc1d2'])
+        cfg = dict(device='pc1', windows=[dict(device='pc1'), dict(device='pc2')])
+        self.assertEqual(configured_devices(cfg), ['pc1', 'pc2'])
 
     def test_close_retry_requires_fresh_panel_observation(self):
         state = {'pending': 'close', 'sent': 1}

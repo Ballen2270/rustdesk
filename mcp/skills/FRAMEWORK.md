@@ -130,6 +130,60 @@ profile = Profile(
 2. **每设备一个 runner + 运行目录**:runner 与 viewer 天然按 run 目录隔离,两台/两个 runner 各管一组设备,互不挤占视觉;网页端多 run 目录切换即可总览
 3. MCP/bridge/点击侧不是瓶颈:每设备独立 bridge 进程,跨设备光标独立;同 PC 多屏共享光标由设备内串行保证
 
+**跨进程 Vision 串行(2026-11-12 实测)**:同一台 Mac 上两个 runner 各按 ~1Hz 调
+Vision 时,ANE/Espresso 的流名额约一分钟后耗尽,两个进程几乎同时抛
+`CRImageReaderError.e5rtError("...execution_stream... call failed")` 并暂停。
+`_framework/vision.ocr` 现在用机器级 fcntl 锁串行 `performRequests`,失败按
+0.5/1/2/4/8 秒阶梯重试(sleep 在锁外,不阻塞其他 runner)。实测 e5rt 故障可持续
+数分钟且 CPU-only 请求同样失败(仍会编译 ANE 程序),所以引擎级故障(`e5rt`/
+`CRImageReaderError`)触发**熔断**:30s 冷却起步、连败翻倍至 120s 封顶,冷却期内
+所有 OCR 立即抛 `VisionUnavailable`,不 perform 也不抢锁;恢复自动复位并记日志。
+调用方(窗口发现)把 `VisionUnavailable` 视为降级而非失败:像素带结果保留为
+`unconfirmed`,不中止启动(见下)。
+
+### 启动窗口发现的成本控制(2026-11-12)
+
+启动时的全屏 OCR 是每设备秒级开销,也是"启动慢 → 人工改脚本"的来源。三层优化:
+
+1. **窗口清单缓存(v2,布局指纹)**:`window_targets` 把每设备最近一次成功
+   **且身份解析通过**的发现结果存到 `~/.cache/rustdesk-mhxy/<device>.windows.json`
+   (`RUSTDESK_WINDOW_CACHE` 可改路径,空串=关闭)。下次启动命中需要两个条件:
+   当前帧**纯像素**测出的窗口集合与缓存逐边 ±8px 完全一致(布局指纹,无 OCR),
+   且每个缓存 rect 上方标题条经 3 变体 recipe 确认 `梦幻西游` 锚点仍在。部分缓存
+   因此**不可能命中**——缺的那扇窗的像素带还在帧上,指纹计数对不上;任何 OCR
+   异常按 miss 处理,回退全量发现。带 `estimated` 边或 `unconfirmed` 的布局一律
+   不落盘。缓存只缩短搜索,从不授权输入,也不替代各 runner 每次启动的对位检查;
+   运行时仍按当前帧重新匹配身份。
+2. **验证 2x 优先**:顶栏小字号标签(活动/排行/指引)1x 只有 ~40% 命中率,
+   2x 接近 100%——验证先跑 2x、空结果才回退 1x,多数窗口省一半验证 OCR 调用。
+   标题条确认用 3 变体 recipe(精确条带 1x → +4px 下垫 2x → +16px 下垫 2x,
+   早停):单 crop 对 ±6px 矩形抖动只有 ~75% 命中,3 变体实测 130/130。
+3. **设备间并行**:`locate_targets` 各设备的截图+发现并发执行(设备独立,
+   互不冲突);OCR 受 GIL/系统服务限制不会线性加速,但省掉串行等待。
+4. 共享帧:启用 `gateway_port` 的 fleet(见 `mcp/README.md`)把同一解码帧
+   广播给该设备的所有 worker,PNG/swizzle 每帧只做一次;OCR 仍各窗独立。
+5. **标题条像素带兜底 + 遮挡恢复**:OCR 标题在窗口贴屏幕边缘时会被裁掉(或把
+   “梦幻西游”读成低分),纯像素的 `measure_windows` 用长中性色横带找标题栏:
+   通知图标只切断它覆盖的几行(同一标题栏被字形行切开的 band 会合并),下方行
+   仍是整窗宽;内容底边取"距 start+宽度/兄弟实测宽高比 ±6px 的最后一条整宽
+   边缘"(兄弟窗不足 2 个时回退旧规则)。**窄带恢复**:被连接面板截断的标题栏
+   只剩 <0.8×中位宽的窄带——用兄弟中位宽度推导底边搜索范围,再垂直内容边缘
+   扫描实测右边缘;实测到则整窗 measured,测不到则标 `estimated=['right']`
+   (选择/身份解析/缓存三处全部拒绝,报错提示等面板收起重扫)。窄带必须过
+   一次标题 OCR 才 admitted(防窗内中性标题栏对话框变成幻影窗);宽度异常的
+   band 也不作为其他窗口底边搜索的 cap。发现路径先跑像素带,失败才回退原
+   OCR 标题锚点。启动 autocal 复用同一函数:zhuagui 按配置中心最近的同尺寸
+   带为每窗取新矩形,像素带失败才回退顶栏锚点/标题栏扫描。
+6. **启动有界重试**:`locate_targets` 最多 3 次尝试(间隔 1.5s,总 deadline
+   ~90s),每次全新截图(stale 帧只重试、永不入清单);取"已验证窗口数最多"
+   的尝试做结果,身份解析失败换帧重试而非立即失败。每次解码帧(含失败尝试)
+   都存 `startup/<device>.png`/`attemptN.png`,并写
+   `startup/<device>.discovery.json`(尝试次数、band rects、verified/
+   unconfirmed/estimated、缓存命中、每候选 OCR 文本与拒绝原因);最终失败抛
+   **聚合错误**(每设备:找到的 id、标题锚点数、目标数、证据路径),不再只报
+   第一个异常。窗口 id 改行聚类排序(y ±20px 聚簇后行内按 x),1-2px 行抖动
+   不再翻转 wN。
+
 ## 七、明确不做
 
 - 不做通用视觉 AI/在线识别(保持本地 OCR+规则,unknown 一律禁输入)

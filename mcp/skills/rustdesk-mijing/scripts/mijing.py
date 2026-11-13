@@ -155,6 +155,9 @@ def recognize(img, wf, anchors=None, active=False):
         items += region_ocr(img, RIGHT_LOW, 2)  # small button text (继续/挑战)
         state = wf.classify(items)
     if state == 'unknown':
+        items += region_ocr(img, TOP_BAR, 2)
+        state = wf.classify(items)
+    if state == 'unknown':
         items += ocr(img)
         state = wf.classify(items)
         source = 'full_ocr_fallback'

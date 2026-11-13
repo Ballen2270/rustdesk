@@ -93,7 +93,7 @@ def main():
             annotated.save(args.output/f'{number}-{variant}-targets.png')
     # ---- member ready-popup detection at the live window widths ----
     # The sweep pairs a 准? read with a same-row 拒绝 on the full device
-    # frame; 960 matches the pc1d1 members, 850/680/615 span the pc2/pc3
+    # frame; 960 matches the pc1 members, 850/680/615 span the pc2/pc3
     # three-size tiling measured live (615 is the smallest — the button
     # OCRs as 准留 there and only the zoomed cascade rescues it).
     def member_canvas(pastes):

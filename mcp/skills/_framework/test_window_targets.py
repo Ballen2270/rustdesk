@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import tempfile
 import sys
 import unittest
@@ -14,9 +15,11 @@ from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
-from window_targets import (build_config, covered_fraction, covered_strips,
-                            identity_matches, locate_targets,
-                            read_inventory, resolve_accounts, discover_windows)
+from window_targets import (TITLE_BAND_PX, build_config, cache_path,
+                            covered_fraction, covered_strips, identity_matches,
+                            load_cached_inventory, locate_targets, order_row_major,
+                            read_inventory, resolve_accounts, save_inventory_cache,
+                            discover_windows)
 
 
 def inventory(device='pc1', resolution=(1280, 960)):
@@ -26,10 +29,19 @@ def inventory(device='pc1', resolution=(1280, 960)):
 
 
 def frame(data):
-    image = Image.new('RGB', tuple(data['native_resolution']))
+    # Blue desktop background, like the real captures: neutral enough that a
+    # black background would both form phantom title bands and hide the
+    # content bottom edge from the pixel detector.
+    image = Image.new('RGB', tuple(data['native_resolution']), (15, 45, 130))
     for i, win in enumerate(data['windows']):
         x, y, w, h = win['rect']
         image.paste(Image.new('RGB', (w, h), (i+1, 0, 0)), (x, y))
+        if y > 0:  # window chrome above the content rect (as measured on device)
+            top = max(0, y-TITLE_BAND_PX)
+            # Light neutral gray: a real title band the pixel detector and
+            # the cache layout fingerprint can measure (dark gray is not
+            # "neutral" for _title_bands).
+            image.paste(Image.new('RGB', (w, y-top), (240, 240, 240)), (x, top))
     return image
 
 
@@ -37,11 +49,32 @@ def recognize(image, box, scale):
     return [dict(text='角色'+str(image.getpixel((0, 0))[0]), score=.9)]
 
 
+def fake_ocr(image, box, scale):
+    """Cache verification and identity resolution on synthetic frames: light
+    title bands read as the game title, colored windows as account names."""
+    r = image.convert('RGB').getpixel((0, 0))[0]
+    if r == 240:
+        return [dict(text='梦幻西游', score=.9)]
+    return [dict(text='角色'+str(r), score=.9)] if r else []
+
+
+def titled_inventory(device='pc1', resolution=(1280, 960)):
+    return dict(device=device, native_resolution=list(resolution), windows=[
+        dict(id='1', rect=[40, 80, 560, 420]),
+        dict(id='2', rect=[640, 80, 560, 420])])
+
+
 class Fixtures:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Window-inventory cache is disabled by default so the offline suite
+        # never reads or writes the operator's real ~/.cache.
+        previous = os.environ.get('RUSTDESK_WINDOW_CACHE')
+        os.environ['RUSTDESK_WINDOW_CACHE'] = ''
+        self.addCleanup(self._restore_cache_env, previous)
+        self.cache_dir = self.root/'cache'
         self.pc1 = inventory()
         self.pc2 = inventory('pc2', (1400, 1000))
         self.paths = []
@@ -52,6 +85,15 @@ class Fixtures:
         self.template = dict(device='pc1', calibrated=False, windows=[
             dict(name='left', mode='double', double_points=200, rounds=5,
                  reward_mode_confirmed=True), dict(name='right', rounds=3)])
+
+    def _restore_cache_env(self, previous):
+        if previous is None:
+            os.environ.pop('RUSTDESK_WINDOW_CACHE', None)
+        else:
+            os.environ['RUSTDESK_WINDOW_CACHE'] = previous
+
+    def enable_cache(self):
+        os.environ['RUSTDESK_WINDOW_CACHE'] = str(self.cache_dir)
 
     def config(self, activity='zhuagui'):
         return build_config(self.template, self.paths, ['pc1:4', 'pc2:2'],
@@ -222,6 +264,141 @@ class SelectionTests(Fixtures, unittest.TestCase):
                 discover_windows(frame(self.pc1), 'pc1')
 
 
+    def test_row_clustered_ids_survive_row_jitter(self):
+        # pc1-style bottom row: plain (y, x) sorting flips w4/w5 when the
+        # rows differ by a pixel; row clustering keeps the x order.
+        base = [[2, 30, 638, 482], [646, 30, 633, 476], [1272, 250, 640, 480],
+                [644, 550, 640, 482], [2, 551, 638, 481]]
+        jitter = [[2, 30, 638, 482], [646, 30, 633, 476], [1272, 250, 640, 480],
+                  [644, 550, 640, 482], [2, 552, 638, 480]]
+        self.assertEqual([base[i][0] for i in order_row_major(base)],
+                         [2, 646, 1272, 2, 644])
+        self.assertEqual([jitter[i][0] for i in order_row_major(jitter)],
+                         [2, 646, 1272, 2, 644])
+
+    def test_estimated_edge_refused_for_selection_and_resolution(self):
+        cfg = self.config()  # built while no window is estimated
+        self.pc1['windows'][3]['estimated'] = ['right']
+        self.paths[0].write_text(json.dumps(self.pc1))
+        with self.assertRaisesRegex(ValueError, 'estimated'):
+            build_config(self.template, self.paths, ['pc1:4', 'pc2:2'],
+                         ['角色4', '角色2'], 'zhuagui')
+        with self.assertRaisesRegex(ValueError, 'estimated'):
+            resolve_accounts(cfg, {'pc1': self.pc1, 'pc2': self.pc2},
+                             {'pc1': frame(self.pc1), 'pc2': frame(self.pc2)}, recognize)
+        self.pc1['windows'][3]['estimated'] = ['bogus']
+        self.paths[0].write_text(json.dumps(self.pc1))
+        with self.assertRaises(ValueError):
+            read_inventory(self.paths[0])
+
+
+def five_window_inventory(device='pc1'):
+    """Five banded windows the pixel detector can measure exactly (top band
+    rows never overlap the window above)."""
+    rects = [[0, 80, 600, 450], [660, 80, 600, 450], [1320, 80, 600, 450],
+             [0, 620, 600, 450], [660, 620, 600, 450]]
+    return dict(device=device, native_resolution=[1920, 1080],
+                windows=[dict(id=str(i+1), rect=r) for i, r in enumerate(rects)])
+
+
+class InventoryCacheTests(Fixtures, unittest.TestCase):
+    def test_cache_roundtrip_verifies_title_anchor(self):
+        self.enable_cache()
+        inv = titled_inventory()
+        image = frame(inv)
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', inv, image)
+            loaded = load_cached_inventory(image, 'pc1')
+        self.assertEqual([w['rect'] for w in loaded['windows']],
+                         [w['rect'] for w in inv['windows']])
+        self.assertEqual(loaded['native_resolution'], [1280, 960])
+
+    def test_top_edge_window_cache_uses_partial_title_band(self):
+        self.enable_cache()
+        inv = titled_inventory()
+        for win in inv['windows']:
+            win['rect'][1] = 31  # title bar nearly flush with the screen top
+        image = frame(inv)
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', inv, image)
+            loaded = load_cached_inventory(image, 'pc1')
+        self.assertEqual([w['rect'] for w in loaded['windows']],
+                         [w['rect'] for w in inv['windows']])
+
+    def test_cache_rejected_without_title_anchor(self):
+        self.enable_cache()
+        inv = titled_inventory()
+        save_inventory_cache('pc1', inv, frame(inv))
+        plain = Image.new('RGB', (1280, 960))  # nothing at the cached rects
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            self.assertIsNone(load_cached_inventory(plain, 'pc1'))
+
+    def test_cache_rejected_on_resolution_change(self):
+        self.enable_cache()
+        inv = titled_inventory()
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', inv, frame(inv))
+            self.assertIsNone(load_cached_inventory(
+                Image.new('RGB', (1920, 1080)), 'pc1'))
+
+    def test_cache_rejected_on_moved_window(self):
+        self.enable_cache()
+        inv = titled_inventory()
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', inv, frame(inv))
+        moved = titled_inventory()
+        for win in moved['windows']:
+            win['rect'][1] += 120  # windows moved down: old bands are empty
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            self.assertIsNone(load_cached_inventory(frame(moved), 'pc1'))
+
+    def test_disabled_cache_writes_nothing_and_corrupt_cache_falls_back(self):
+        inv = titled_inventory()
+        save_inventory_cache('pc1', inv, frame(inv))  # disabled: no file, no error
+        self.assertIsNone(cache_path('pc1'))
+        self.enable_cache()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        (self.cache_dir/'pc1.windows.json').write_text('{not json')
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            self.assertIsNone(load_cached_inventory(frame(inv), 'pc1'))
+
+    def test_partial_cache_never_loads_as_complete(self):
+        # The core anti-poisoning rule: a 4-of-5 discovery persisted earlier
+        # must not shorten later runs — the fifth window is still measured on
+        # the frame, so the layout fingerprint fails and discovery re-runs.
+        self.enable_cache()
+        five = five_window_inventory()
+        image = frame(five)
+        partial = dict(five, windows=five['windows'][:4])
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', partial, image)
+            self.assertIsNone(load_cached_inventory(image, 'pc1'))
+            save_inventory_cache('pc1', five, image)
+            loaded = load_cached_inventory(image, 'pc1')
+        self.assertEqual([w['rect'] for w in loaded['windows']],
+                         [w['rect'] for w in five['windows']])
+
+    def test_unconfirmed_or_estimated_windows_are_never_cached(self):
+        self.enable_cache()
+        five = five_window_inventory()
+        five['windows'][0]['unconfirmed'] = True
+        five['windows'][1]['estimated'] = ['right']
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', five, frame(five))
+        data = json.loads((self.cache_dir/'pc1.windows.json').read_text())
+        self.assertEqual([w['id'] for w in data['windows']], ['3', '4', '5'])
+
+    def test_cache_validation_ocr_error_is_a_miss_not_a_failure(self):
+        self.enable_cache()
+        five = five_window_inventory()
+        image = frame(five)
+        with patch('window_targets.region_ocr', side_effect=fake_ocr):
+            save_inventory_cache('pc1', five, image)
+        with patch('window_targets.region_ocr',
+                   side_effect=RuntimeError('CRImageReaderError.e5rtError')):
+            self.assertIsNone(load_cached_inventory(image, 'pc1'))
+
+
 class PreflightTests(Fixtures, unittest.IsolatedAsyncioTestCase):
     def response(self, device, stale=False):
         data = self.pc1 if device == 'pc1' else self.pc2
@@ -256,11 +433,115 @@ class PreflightTests(Fixtures, unittest.IsolatedAsyncioTestCase):
             await locate_targets(cfg, call, self.root, 'zhuagui')
         self.assertEqual(cfg, before)
 
+    async def test_stale_first_frame_is_retried_on_a_fresh_one(self):
+        # Cold connect: the first frame can be stale; startup must retry and
+        # succeed on the second attempt instead of aborting the run.
+        cfg = self.config()
+        queue = {device: [self.response(device, True), self.response(device)]
+                 for device in ('pc1', 'pc2')}
+
+        async def call(name, device, **kwargs):
+            return queue[device].pop(0)
+
+        import window_targets
+        real_resolve = window_targets.resolve_accounts
+        with patch('window_targets.discover_windows',
+                   side_effect=lambda image, device: self.pc1 if device == 'pc1' else self.pc2), \
+             patch('window_targets.resolve_accounts',
+                   side_effect=lambda *a: real_resolve(*a, recognize)):
+            await locate_targets(cfg, call, self.root, 'zhuagui')
+        self.assertFalse(cfg['autocal'])
+        self.assertEqual(cfg['windows'][0]['rect'], [640, 480, 640, 480])
+        self.assertTrue(all(not pending for pending in queue.values()))
+        self.assertTrue((self.root/'startup/pc1.attempt2.png').exists())
+        self.assertTrue((self.root/'startup/pc1.discovery.json').exists())
+
+    async def test_short_first_frame_retries_and_takes_the_best_attempt(self):
+        # The startup overlay panel hides a window on the first frame and is
+        # gone on the second: the best attempt (most windows) must win even
+        # though the first also produced a valid inventory.
+        cfg = self.config()
+        short = copy.deepcopy(self.pc1)
+        short['windows'] = short['windows'][:3]
+        seen = []
+
+        def discover(image, device):
+            if device != 'pc1':
+                return self.pc2
+            if seen:
+                return self.pc1
+            seen.append(1)
+            return short
+
+        import window_targets
+        real_resolve = window_targets.resolve_accounts
+        call = AsyncMock(side_effect=lambda name, device, **kwargs: self.response(device))
+        with patch('window_targets.discover_windows', side_effect=discover), \
+             patch('window_targets.resolve_accounts',
+                   side_effect=lambda *a: real_resolve(*a, recognize)):
+            await locate_targets(cfg, call, self.root, 'zhuagui')
+        self.assertEqual(cfg['windows'][0]['rect'], [640, 480, 640, 480])
+
+    def test_vision_outage_degrades_to_unconfirmed_pixel_bands(self):
+        # With Vision down the pixel bands still measure every window; they
+        # are kept marked unconfirmed (never cached) instead of aborting.
+        from vision import VisionUnavailable
+        with patch('window_targets.region_ocr', side_effect=VisionUnavailable('down')):
+            inventory = discover_windows(frame(five_window_inventory()), 'pc1')
+        self.assertEqual(len(inventory['windows']), 5)
+        self.assertTrue(all(w['unconfirmed'] for w in inventory['windows']))
+        self.assertTrue(all(not w['estimated'] for w in inventory['windows']))
+
     async def test_activity_mismatch_fails_before_screenshot(self):
         call = AsyncMock()
         with self.assertRaises(ValueError):
             await locate_targets(self.config(), call, self.root, 'fuben')
         call.assert_not_awaited()
+
+    async def test_verified_cache_skips_full_discovery_until_layout_moves(self):
+        self.enable_cache()
+        self.pc1 = titled_inventory()
+        self.paths[0].write_text(json.dumps(self.pc1))
+        cfg = build_config(self.template, self.paths, ['pc1:1', 'pc2:2'],
+                           ['角色1', '角色2'], 'zhuagui')
+        call = AsyncMock(side_effect=lambda name, device, **kwargs: self.response(device))
+        import window_targets
+        real_resolve = window_targets.resolve_accounts
+
+        async def run(output, discover):
+            output.mkdir(parents=True)  # runners create the run dir before preflight
+            with patch('window_targets.region_ocr', side_effect=fake_ocr), \
+                 patch('window_targets.discover_windows', side_effect=discover), \
+                 patch('window_targets.resolve_accounts',
+                       side_effect=lambda *a: real_resolve(*a, recognize=fake_ocr)):
+                await locate_targets(cfg, call, output, 'zhuagui')
+
+        # run 1: no cache yet -> discovery produces the layout and seeds it
+        await run(self.root/'run1', lambda image, device: self.pc1 if device == 'pc1' else self.pc2)
+        self.assertTrue((self.cache_dir/'pc1.windows.json').exists())
+        self.assertEqual(cfg['windows'][0]['rect'], [40, 80, 560, 420])
+
+        # run 2: pc1's cached rects verify on the fresh frame -> no discovery
+        def fail_pc1(image, device):
+            if device == 'pc1':
+                raise AssertionError('verified cache must skip full discovery')
+            return self.pc2
+        await run(self.root/'run2', fail_pc1)
+        self.assertEqual(cfg['windows'][0]['rect'], [40, 80, 560, 420])
+
+        # run 3: windows moved -> cached title bands fail -> rediscovery
+        moved = copy.deepcopy(self.pc1)
+        for win in moved['windows']:
+            win['rect'][1] += 120
+        self.pc1 = moved
+        calls = []
+
+        def discover_moved(image, device):
+            calls.append(device)
+            return moved if device == 'pc1' else self.pc2
+        await run(self.root/'run3', discover_moved)
+        self.assertEqual(set(calls), {'pc1', 'pc2'})  # pc2 has no cache (y=0 fixture)
+        self.assertEqual(cfg['windows'][0]['rect'], [40, 200, 560, 420])
 
     async def test_all_five_runners_selected_startup_and_stop_without_inputs(self):
         root = Path(__file__).resolve().parents[3]
